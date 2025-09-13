@@ -2,7 +2,7 @@ CHANGELOG.md
 RELEASELOG.md
 sonar-project.properties
 .gitlab-ci.yml
-
+OPEN_SOURCE_NOTICE.html
 *.jpg
 *.webp
 *.bmp
