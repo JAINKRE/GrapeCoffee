@@ -1,6 +1,7 @@
 CHANGELOG.md
 RELEASELOG.md
 sonar-project.properties
+.gitlab-ci.yml
 
 *.jpg
 *.gif
