@@ -1,5 +1,6 @@
 <p align="center"><a href="https://github.com/JAINKRE/GrapeCoffee"><img src="./GrapeCoffe_logo.png" alt="GrapeCoffee" width="200" /></a></p>
 <p align="center"><b>GrapeCoffee 智能变量名助手</b></p>
+
 ---
 
 GrapeCoffee 是一款基于 Ollama 服务的智能变量命名工具，能够将中文变量名自动翻译为英文，并解析为多种常见的命名规则。
