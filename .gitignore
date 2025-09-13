@@ -4,7 +4,6 @@ sonar-project.properties
 .gitlab-ci.yml
 
 *.jpg
-*.gif
 *.webp
 *.bmp
 *.spec
