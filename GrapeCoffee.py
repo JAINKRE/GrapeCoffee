@@ -13,9 +13,10 @@ import httplib2
 import requests
 import win32clipboard as w
 import win32con
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QButtonGroup, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QButtonGroup, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QDialog
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
+from config import icon_base64
 import base64
 from PySide6.QtGui import QPixmap, QIcon
 _year = datetime.now().year
@@ -53,7 +54,7 @@ def translation_api(input_chinese_content, input_language, translation_language,
     myurl = myurl + '?q=' + urllib.parse.quote(input_chinese_content) + '&from=' + input_language + '&to=' + translation_language + '&appid=' + appid + '&salt=' + str(salt) + '&sign=' + sign
     try:
         cache = httplib2.Http('C:\\GrapeCoffee\\\\API_baidu\\\\cache')
-        _response, content = cache.request(myurl)
+        (_response, content) = cache.request(myurl)
         if _response.status == 200:
             _response = json.loads(content.decode('utf-8'))
             translation_results = _response['trans_result'][0]['dst']
@@ -82,9 +83,65 @@ class ModelRefreshWorker(QThread):
         except Exception as e:
             self.refresh_finished.emit([], str(e))
 
+class UpdateCheckWorker(QThread):
+    update_checked = Signal(dict, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.github_repo = 'JAINKRE/GrapeCoffee'
+
+    def run(self):
+        try:
+            url = f'https://api.github.com/repos/{self.github_repo}/releases/latest'
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            release_data = response.json()
+            update_info = {'version': release_data.get('tag_name', ''), 'download_url': '', 'release_notes': release_data.get('body', '')}
+            assets = release_data.get('assets', [])
+            for asset in assets:
+                if asset.get('name', '') == 'GrapeCoffee-x64_Setup.exe':
+                    update_info['download_url'] = asset.get('browser_download_url', '')
+                    break
+            self.update_checked.emit(update_info, '')
+        except Exception as e:
+            self.update_checked.emit({}, str(e))
+
+class UpdateDownloadWorker(QThread):
+    download_progress = Signal(int)
+    download_finished = Signal(str, str)
+
+    def __init__(self, download_url, parent=None):
+        super().__init__(parent)
+        self.download_url = download_url
+        self.is_cancelled = False
+
+    def run(self):
+        try:
+            download_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
+            if not os.path.exists(download_dir):
+                os.makedirs(download_dir)
+            file_path = os.path.join(download_dir, 'GrapeCoffee-x64_Setup.exe')
+            response = requests.get(self.download_url, stream=True, timeout=30)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if self.is_cancelled:
+                        return
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            progress = int(downloaded_size / total_size * 100)
+                            self.download_progress.emit(progress)
+            self.download_finished.emit(file_path, '')
+        except Exception as e:
+            self.download_finished.emit('', str(e))
+
 def get_ollama_models(server_url):
     try:
-        response = requests.get(f'{server_url}/api/tags', timeout=10)
+        response = requests.get(f'{self.server_url}/api/tags', timeout=10)
         response.raise_for_status()
         models_data = response.json()
         model_names = [model['name'] for model in models_data.get('models', [])]
@@ -95,22 +152,26 @@ def get_ollama_models(server_url):
 
 class OllamaAigc(object):
 
-    def __init__(self, _send_chat_url, _model, _stream, _temperature, _prompt_template):
+    def __init__(self, _send_chat_url, _model, _stream, _temperature, _prompt_template, _timeout=60):
         self.send_chat_url = _send_chat_url
         self.model = _model
         self.stream = _stream
         self.temperature = _temperature
         self.prompt_template = _prompt_template
+        self.timeout = _timeout
 
     def send_chat_request(self, translate_word):
         prompt = self.prompt_template.format(translate_word=translate_word)
         messages = [{'role': 'user', 'content': prompt}]
         payload = {'model': self.model, 'messages': messages, 'stream': self.stream, 'temperature': self.temperature}
         try:
-            _response = requests.post(self.send_chat_url, json=payload, timeout=60)
-            _response.raise_for_status()
-            chat_response = _response.json()
-            return chat_response
+            response = requests.post(self.send_chat_url, json=payload, timeout=self.timeout, stream=self.stream)
+            if self.stream:
+                return response
+            else:
+                response.raise_for_status()
+                chat_response = response.json()
+                return chat_response
         except requests.exceptions.RequestException as e:
             return None
 
@@ -175,6 +236,7 @@ class Convert(object):
 class TranslationWorker(QThread):
     translation_finished = Signal(str, str, str)
     progress_updated = Signal(int)
+    stream_chunk_received = Signal(str)
 
     def __init__(self, mode, input_text, ollama_config=None, api_config=None, parent=None):
         super().__init__(parent)
@@ -192,7 +254,7 @@ class TranslationWorker(QThread):
                 TranslationLanguage = 'en'
                 appid = self.api_config.get('appid', '')
                 secretKey = self.api_config.get('secretKey', '')
-                TranslationResults, InputInformation = translation_api(self.input_text, InputLanguage, TranslationLanguage, appid, secretKey)
+                (TranslationResults, InputInformation) = translation_api(self.input_text, InputLanguage, TranslationLanguage, appid, secretKey)
                 if TranslationResults is None:
                     self.translation_finished.emit('', InputInformation, '')
                     return
@@ -204,13 +266,50 @@ class TranslationWorker(QThread):
                 stream = self.ollama_config.get('stream', False)
                 temperature = self.ollama_config.get('temperature')
                 prompt_template = self.ollama_config.get('prompt_template')
+                timeout = self.ollama_config.get('timeout', 600)
                 send_chat_url = f'{ollama_server}/api/chat'
-                response = OllamaAigc(send_chat_url, model, stream, temperature, prompt_template).send_chat_request(self.input_text)
+                response = OllamaAigc(send_chat_url, model, stream, temperature, prompt_template, timeout).send_chat_request(self.input_text)
                 if response is None:
                     self.translation_finished.emit('', 'Ollama接口调用失败，请检查服务器地址和模型是否正确', '')
                     return
-                result = response['message']['content'].replace('_', ' ')
-                raw_response = response['message']['content']
+                if stream:
+                    full_response = ''
+                    for line in response.iter_lines():
+                        if self.is_cancelled:
+                            return
+                        if line:
+                            try:
+                                decoded_line = line.decode('utf-8')
+                                if decoded_line.startswith('data: '):
+                                    json_str = decoded_line[6:]
+                                    if json_str.strip() == '[DONE]':
+                                        break
+                                    try:
+                                        data = json.loads(json_str)
+                                        if 'message' in data and 'content' in data['message']:
+                                            chunk = data['message']['content']
+                                            full_response += chunk
+                                            self.stream_chunk_received.emit(chunk)
+                                    except json.JSONDecodeError:
+                                        pass
+                                else:
+                                    try:
+                                        data = json.loads(decoded_line)
+                                        if 'message' in data and 'content' in data['message']:
+                                            chunk = data['message']['content']
+                                            full_response += chunk
+                                            self.stream_chunk_received.emit(chunk)
+                                    except json.JSONDecodeError:
+                                        pass
+                            except UnicodeDecodeError:
+                                pass
+                    result = full_response.replace('_', ' ')
+                    raw_response = full_response
+                else:
+                    response.raise_for_status()
+                    data = response.json()
+                    result = data['message']['content'].replace('_', ' ')
+                    raw_response = data['message']['content']
             self.progress_updated.emit(100)
             self.translation_finished.emit(result, '', raw_response)
         except Exception as e:
@@ -250,30 +349,34 @@ class VariableNameTranslatorUI(QMainWindow):
         super().__init__()
         self.translation_worker = None
         self.model_refresh_worker = None
+        self.update_check_worker = None
+        self.update_download_worker = None
         self.shortcuts = []
         self.naming_results = []
         self.config = self.load_config()
         self.init_ui()
         QTimer.singleShot(100, self.auto_refresh_models)
         self.init_shortcuts()
+        if self.config.get('auto_update', True):
+            QTimer.singleShot(2000, self.check_for_updates)
 
     def init_ui(self):
         self.setWindowTitle(f'{name}')
-        self.setGeometry(100, 100, 650, 800)
+        self.setGeometry(100, 100, 600, 888)
         self.setMinimumSize(600, 800)
-        self.set_window_icon()
+        try:
+            image_data = base64.b64decode(icon_base64)
+            pixmap = QPixmap()
+            pixmap.loadFromData(image_data)
+            icon = QIcon(pixmap)
+            self.setWindowIcon(icon)
+        except Exception as e:
+            print(f'设置窗口图标失败: {e}')
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        title_label = QLabel(f'{name}')
-        title_font = QFont()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(title_label)
         tab_widget = QTabWidget()
         main_layout.addWidget(tab_widget)
         translation_tab = self.create_translation_tab()
@@ -289,17 +392,6 @@ class VariableNameTranslatorUI(QMainWindow):
         if self.config.get('always_on_top', False):
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
             self.show()
-
-    def set_window_icon(self):
-        icon_base64 = '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'
-        try:
-            image_data = base64.b64decode(icon_base64)
-            pixmap = QPixmap()
-            pixmap.loadFromData(image_data)
-            icon = QIcon(pixmap)
-            self.setWindowIcon(icon)
-        except Exception as e:
-            print(f'设置窗口图标失败: {e}')
 
     def create_translation_tab(self):
         tab = QWidget()
@@ -328,11 +420,16 @@ class VariableNameTranslatorUI(QMainWindow):
         self.current_model_label = QLabel()
         mode_layout.addWidget(self.current_model_label)
         self.model_radio.toggled.connect(self.update_current_model_label)
-        prefix_group = QGroupBox('变量前缀')
-        prefix_layout = QHBoxLayout(prefix_group)
+        prefix_suffix_group = QGroupBox('变量前缀和后缀')
+        prefix_suffix_layout = QHBoxLayout(prefix_suffix_group)
         self.prefix_edit = QLineEdit()
         self.prefix_edit.setPlaceholderText('设置变量名前缀（可选）')
-        prefix_layout.addWidget(self.prefix_edit)
+        prefix_suffix_layout.addWidget(QLabel('前缀:'))
+        prefix_suffix_layout.addWidget(self.prefix_edit)
+        self.suffix_edit = QLineEdit()
+        self.suffix_edit.setPlaceholderText('设置变量名后缀（可选）')
+        prefix_suffix_layout.addWidget(QLabel('后缀:'))
+        prefix_suffix_layout.addWidget(self.suffix_edit)
         button_layout = QHBoxLayout()
         self.translate_btn = QPushButton('开始翻译')
         self.translate_btn.clicked.connect(self.start_translation)
@@ -377,7 +474,7 @@ class VariableNameTranslatorUI(QMainWindow):
         result_layout.setContentsMargins(5, 5, 5, 5)
         layout.addWidget(input_group)
         layout.addWidget(mode_group)
-        layout.addWidget(prefix_group)
+        layout.addWidget(prefix_suffix_group)
         layout.addLayout(button_layout)
         layout.addWidget(self.progress_bar)
         layout.addWidget(result_group)
@@ -414,18 +511,34 @@ class VariableNameTranslatorUI(QMainWindow):
         model_layout.addWidget(self.model_combo, 1)
         model_layout.addWidget(self.refresh_btn)
         ollama_layout.addLayout(model_layout)
+        params_layout = QHBoxLayout()
         temp_layout = QHBoxLayout()
-        temp_layout.addWidget(QLabel('温度参数:'))
+        temp_label = QLabel('温度参数:')
         self.temp_edit = QLineEdit(str(self.config.get('ollama_temperature', 0.0)))
         self.temp_edit.setFixedWidth(100)
+        temp_layout.addWidget(temp_label)
         temp_layout.addWidget(self.temp_edit)
-        temp_layout.addStretch()
-        ollama_layout.addLayout(temp_layout)
+        params_layout.addLayout(temp_layout)
+        timeout_layout = QHBoxLayout()
+        timeout_label = QLabel('请求超时(秒):')
+        self.timeout_edit = QLineEdit(str(self.config.get('ollama_timeout', 60)))
+        self.timeout_edit.setFixedWidth(100)
+        timeout_layout.addWidget(timeout_label)
+        timeout_layout.addWidget(self.timeout_edit)
+        params_layout.addLayout(timeout_layout)
+        stream_layout = QHBoxLayout()
+        stream_layout.addWidget(QLabel('流式输出:'))
+        self.stream_checkbox = QCheckBox('启用')
+        self.stream_checkbox.setChecked(self.config.get('ollama_stream', True))
+        stream_layout.addWidget(self.stream_checkbox)
+        params_layout.addLayout(stream_layout)
+        params_layout.addStretch()
+        ollama_layout.addLayout(params_layout)
         prompt_layout = QVBoxLayout()
         prompt_label = QLabel('提示词模板:')
         prompt_layout.addWidget(prompt_label)
         self.prompt_edit = QTextEdit()
-        self.prompt_edit.setMaximumHeight(150)
+        self.prompt_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.prompt_edit.setStyleSheet('\n            QTextEdit {\n                border: 1px solid #bdc3c7;\n                border-radius: 4px;\n                font-family: Consolas;\n            }\n        ')
         prompt_template = self.config.get('ollama_prompt_template', 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.')
         self.prompt_edit.setPlainText(prompt_template)
@@ -446,12 +559,28 @@ class VariableNameTranslatorUI(QMainWindow):
         self.key_edit = QLineEdit(self.config.get('baidu_secretKey', ''))
         key_layout.addWidget(self.key_edit)
         api_layout.addLayout(key_layout)
+        settings_layout = QHBoxLayout()
         window_group = QGroupBox('窗口设置')
         window_layout = QVBoxLayout(window_group)
         self.always_on_top_checkbox = QCheckBox('窗口置顶')
         self.always_on_top_checkbox.setChecked(self.config.get('always_on_top', False))
         self.always_on_top_checkbox.toggled.connect(self.toggle_always_on_top)
         window_layout.addWidget(self.always_on_top_checkbox)
+        update_group = QGroupBox('更新设置')
+        update_layout = QHBoxLayout(update_group)
+        update_layout.addWidget(QLabel('启动时自动检查更新:'))
+        self.auto_update_checkbox = QCheckBox()
+        self.auto_update_checkbox.setChecked(self.config.get('auto_update', True))
+        update_layout.addWidget(self.auto_update_checkbox)
+        self.check_update_btn = QPushButton('立即检查更新')
+        self.check_update_btn.clicked.connect(self.check_for_updates)
+        update_layout.addWidget(self.check_update_btn)
+        self.view_project_btn = QPushButton('查看项目')
+        self.view_project_btn.clicked.connect(self.open_github_page)
+        update_layout.addWidget(self.view_project_btn)
+        update_layout.addStretch()
+        settings_layout.addWidget(window_group)
+        settings_layout.addWidget(update_group)
         shortcut_group = QGroupBox('快捷键设置')
         shortcut_layout = QVBoxLayout(shortcut_group)
         self.enable_shortcuts_checkbox = QCheckBox('启用快捷键 (Ctrl+Alt+数字键)')
@@ -481,13 +610,20 @@ class VariableNameTranslatorUI(QMainWindow):
         button_layout.addWidget(save_btn)
         layout.addWidget(ollama_group)
         layout.addWidget(api_group)
-        layout.addWidget(window_group)
         layout.addWidget(shortcut_group)
-        layout.addStretch()
+        layout.addLayout(settings_layout)
         layout.addLayout(button_layout)
         self.update_current_model_label()
         self.model_combo.currentTextChanged.connect(self.update_current_model_label)
         return tab
+
+    def open_github_page(self):
+        import webbrowser
+        try:
+            webbrowser.open('https://github.com/JAINKRE/GrapeCoffee')
+            self.statusBar().showMessage('正在打开GitHub项目页面...')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'无法打开浏览器: {str(e)}')
 
     def update_current_model_label(self):
         if hasattr(self, 'model_combo') and self.model_radio.isChecked():
@@ -580,6 +716,79 @@ class VariableNameTranslatorUI(QMainWindow):
             QMessageBox.information(self, '刷新成功', f'成功获取到 {len(model_names)} 个模型')
             self.statusBar().showMessage(f'模型列表更新成功，共 {len(model_names)} 个模型')
 
+    def check_for_updates(self):
+        self.check_update_btn.setEnabled(False)
+        self.check_update_btn.setText('检查中...')
+        self.statusBar().showMessage('正在检查更新...')
+        self.update_check_worker = UpdateCheckWorker()
+        self.update_check_worker.update_checked.connect(self.on_update_checked)
+        self.update_check_worker.start()
+
+    def on_update_checked(self, update_info, error):
+        self.check_update_btn.setEnabled(True)
+        self.check_update_btn.setText('立即检查更新')
+        if error:
+            self.statusBar().showMessage('检查更新完成')
+            return
+        if not update_info or not update_info.get('version'):
+            QMessageBox.information(self, '检查更新', '无法获取版本信息')
+            self.statusBar().showMessage('检查更新完成')
+            return
+        latest_version = update_info['version']
+        current_version = f'v{version}'
+        if latest_version > current_version:
+            reply = QMessageBox.information(self, '发现新版本', f'发现新版本 {latest_version}，当前版本 {current_version}\n\n是否下载更新？', QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                if not update_info.get('download_url'):
+                    QMessageBox.critical(self, '下载失败', '未找到下载链接')
+                    return
+                self.download_update(update_info['download_url'])
+        else:
+            self.statusBar().showMessage('已是最新版本')
+
+    def download_update(self, download_url):
+        self.download_progress_dialog = QDialog(self)
+        self.download_progress_dialog.setWindowTitle('下载更新')
+        self.download_progress_dialog.setFixedSize(200, 100)
+        self.download_progress_dialog.setModal(True)
+        layout = QVBoxLayout(self.download_progress_dialog)
+        label = QLabel('正在下载更新...')
+        layout.addWidget(label)
+        self.download_progress_bar = QProgressBar()
+        self.download_progress_bar.setRange(0, 100)
+        layout.addWidget(self.download_progress_bar)
+        cancel_btn = QPushButton('取消')
+        layout.addWidget(cancel_btn)
+        cancel_btn.clicked.connect(self.cancel_download)
+        cancel_btn.clicked.connect(self.download_progress_dialog.close)
+        self.download_progress_dialog.show()
+        self.update_download_worker = UpdateDownloadWorker(download_url)
+        self.update_download_worker.download_progress.connect(self.on_download_progress)
+        self.update_download_worker.download_finished.connect(self.on_download_finished)
+        self.update_download_worker.start()
+
+    def on_download_progress(self, progress):
+        if hasattr(self, 'download_progress_bar'):
+            self.download_progress_bar.setValue(progress)
+
+    def on_download_finished(self, file_path, error):
+        if hasattr(self, 'download_progress_dialog'):
+            self.download_progress_dialog.close()
+        if error:
+            QMessageBox.critical(self, '下载失败', f'下载更新时出错: {error}')
+            self.statusBar().showMessage('下载更新失败')
+            return
+        try:
+            os.startfile(file_path)
+            self.close()
+        except Exception as e:
+            QMessageBox.critical(self, '安装失败', f'启动安装程序时出错: {str(e)}')
+
+    def cancel_download(self):
+        if self.update_download_worker and self.update_download_worker.isRunning():
+            self.update_download_worker.is_cancelled = True
+            self.statusBar().showMessage('已取消下载')
+
     def start_translation(self):
         input_text = self.input_edit.text().strip()
         if not input_text:
@@ -602,12 +811,20 @@ class VariableNameTranslatorUI(QMainWindow):
         self.statusBar().showMessage('正在翻译...')
         self.clear_results()
         self.raw_output_text.clear()
-        ollama_config = {'server': self.server_edit.text().strip(), 'model': self.model_combo.currentText().strip(), 'temperature': float(self.temp_edit.text().strip() or '0.0'), 'stream': False, 'prompt_template': self.prompt_edit.toPlainText()}
+        ollama_config = {'server': self.server_edit.text().strip(), 'model': self.model_combo.currentText().strip(), 'temperature': float(self.temp_edit.text().strip() or '0.0'), 'timeout': int(self.timeout_edit.text().strip() or '60'), 'stream': self.stream_checkbox.isChecked(), 'prompt_template': self.prompt_edit.toPlainText()}
         api_config = {'appid': self.appid_edit.text().strip(), 'secretKey': self.key_edit.text().strip()}
         self.translation_worker = TranslationWorker(mode, input_text, ollama_config, api_config)
         self.translation_worker.translation_finished.connect(self.on_translation_finished)
         self.translation_worker.progress_updated.connect(self.progress_bar.setValue)
+        self.translation_worker.stream_chunk_received.connect(self.on_stream_chunk_received)
         self.translation_worker.start()
+
+    def on_stream_chunk_received(self, chunk):
+        self.raw_output_text.insertPlainText(chunk)
+        cursor = self.raw_output_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.raw_output_text.setTextCursor(cursor)
+        self.raw_output_text.ensureCursorVisible()
 
     def cancel_translation(self):
         if self.translation_worker and self.translation_worker.isRunning():
@@ -626,9 +843,9 @@ class VariableNameTranslatorUI(QMainWindow):
             QMessageBox.warning(self, '翻译失败', '未获得翻译结果')
             self.statusBar().showMessage('翻译失败')
             return
-        if raw_response:
+        if raw_response and (not self.stream_checkbox.isChecked()):
             self.raw_output_text.setPlainText(raw_response)
-        else:
+        elif not self.stream_checkbox.isChecked():
             self.raw_output_text.setPlainText('此功能仅在大模型翻译模式下可用')
         cleaned_result = re.sub('\\<think\\>.*?\\<\\/think\\>', '', result, flags=re.DOTALL)
         words = [word.lower() for word in cleaned_result.split() if word]
@@ -650,15 +867,21 @@ class VariableNameTranslatorUI(QMainWindow):
     def display_results(self, words: List[str]):
         self.naming_results.clear()
         prefix = self.prefix_edit.text().strip()
+        suffix = self.suffix_edit.text().strip()
         converter = Convert()
         naming_rules = [('私有成员', converter.case_01), ('特殊方法', converter.case_02), ('驼峰命名法', converter.case_03), ('帕斯卡命名法', converter.case_04), ('蛇形命名法', converter.case_05), ('匈牙利命名法', converter.case_06), ('烤肉串命名法', converter.case_07), ('常量命名法', converter.case_08)]
-        for i, (title, func) in enumerate(naming_rules):
+        for (i, (title, func)) in enumerate(naming_rules):
             result = converter.convert_warr(words, func)
             if prefix:
                 if title in ['私有成员', '特殊方法']:
                     result = prefix.lower() + result
                 else:
                     result = prefix.lower() + '_' + result
+            if suffix:
+                if title in ['私有成员', '特殊方法']:
+                    result = result + suffix.lower()
+                else:
+                    result = result + '_' + suffix.lower()
             self.add_result_widget(i, title, result)
             self.naming_results.append(result)
 
@@ -685,11 +908,14 @@ class VariableNameTranslatorUI(QMainWindow):
             if current_model in models:
                 self.model_combo.setCurrentText(current_model)
             self.temp_edit.setText(str(self.config['ollama_temperature']))
+            self.timeout_edit.setText(str(self.config['ollama_timeout']))
+            self.stream_checkbox.setChecked(self.config['ollama_stream'])
             self.prompt_edit.setPlainText(self.config['ollama_prompt_template'])
             self.appid_edit.setText(self.config['baidu_appid'])
             self.key_edit.setText(self.config['baidu_secretKey'])
             self.always_on_top_checkbox.setChecked(self.config['always_on_top'])
             self.enable_shortcuts_checkbox.setChecked(self.config['enable_shortcuts'])
+            self.auto_update_checkbox.setChecked(self.config['auto_update'])
             self.toggle_always_on_top(self.config['always_on_top'])
             self.update_current_model_label()
             QMessageBox.information(self, '恢复默认', '已恢复默认设置')
@@ -700,11 +926,14 @@ class VariableNameTranslatorUI(QMainWindow):
         self.config['ollama_server'] = self.server_edit.text().strip()
         self.config['ollama_model'] = self.model_combo.currentText().strip()
         self.config['ollama_temperature'] = float(self.temp_edit.text().strip() or '0.0')
+        self.config['ollama_timeout'] = int(self.timeout_edit.text().strip() or '60')
+        self.config['ollama_stream'] = self.stream_checkbox.isChecked()
         self.config['ollama_prompt_template'] = self.prompt_edit.toPlainText()
         self.config['baidu_appid'] = self.appid_edit.text().strip()
         self.config['baidu_secretKey'] = self.key_edit.text().strip()
         self.config['always_on_top'] = self.always_on_top_checkbox.isChecked()
         self.config['enable_shortcuts'] = self.enable_shortcuts_checkbox.isChecked()
+        self.config['auto_update'] = self.auto_update_checkbox.isChecked()
         models = []
         for i in range(self.model_combo.count()):
             models.append(self.model_combo.itemText(i))
@@ -718,7 +947,7 @@ class VariableNameTranslatorUI(QMainWindow):
             QMessageBox.critical(self, '保存失败', f'保存配置失败: {str(e)}')
 
     def get_default_config(self):
-        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True}
+        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'auto_update': True}
 
     def load_config(self):
         default_config = self.get_default_config()
@@ -740,6 +969,13 @@ class VariableNameTranslatorUI(QMainWindow):
         if self.model_refresh_worker and self.model_refresh_worker.isRunning():
             self.model_refresh_worker.quit()
             self.model_refresh_worker.wait()
+        if self.update_check_worker and self.update_check_worker.isRunning():
+            self.update_check_worker.quit()
+            self.update_check_worker.wait()
+        if self.update_download_worker and self.update_download_worker.isRunning():
+            self.update_download_worker.is_cancelled = True
+            self.update_download_worker.quit()
+            self.update_download_worker.wait()
         event.accept()
 
 def main():
@@ -750,5 +986,5 @@ def main():
     sys.exit(app.exec())
 if __name__ == '__main__':
     name = 'GrapeCoffee 智能变量名助手'
-    version = '2.1.2'
+    version = '2.1.3'
     main()
