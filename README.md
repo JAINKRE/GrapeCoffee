@@ -134,7 +134,7 @@ You are a professional software variable name assistant integrated into the prog
 
 项目本身是开源且免费无偿使用的，如果对您有帮助，欢迎赞赏支持☺️
 
-<img src="D:\Desktop\新建文件夹\Praise.png" style="zoom:33%;" />
+<img src="./Praise.png" style="zoom:33%;" />
 
 
 
