@@ -9,16 +9,18 @@ from datetime import datetime
 from hashlib import md5
 from typing import List, Callable
 import os
+import tempfile
 import httplib2
 import requests
 import win32clipboard as w
 import win32con
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QButtonGroup, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QDialog
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QButtonGroup, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QStyleFactory, QSystemTrayIcon, QMenu, QApplication
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut, QTextCursor
-from config import icon_base64
+from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor, QAction, QIcon
+from config import icon_base64, wxpay_base64
 import base64
 from PySide6.QtGui import QPixmap, QIcon
+from PySide6 import QtGui
 _year = datetime.now().year
 CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.GrapeCoffee_config.json')
 
@@ -42,6 +44,89 @@ class Clipboard(object):
         w.EmptyClipboard()
         w.SetClipboardData(win32con.CF_UNICODETEXT, a_string)
         w.CloseClipboard()
+
+class NoWheelComboBox(QComboBox):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+def check_single_instance_with_file(name):
+    try:
+        pid_file_path = os.path.join(tempfile.gettempdir(), f'{name}.pid')
+        if os.path.exists(pid_file_path):
+            with open(pid_file_path, 'r') as f:
+                try:
+                    pid = int(f.read().strip())
+                except ValueError:
+                    os.remove(pid_file_path)
+                    with open(pid_file_path, 'w') as f:
+                        f.write(str(os.getpid()))
+                    return True
+            if _is_process_running(pid):
+                if _is_jianke_process(pid, name):
+                    return False
+                else:
+                    os.remove(pid_file_path)
+                    with open(pid_file_path, 'w') as f:
+                        f.write(str(os.getpid()))
+                    return True
+            else:
+                os.remove(pid_file_path)
+                with open(pid_file_path, 'w') as f:
+                    f.write(str(os.getpid()))
+                return True
+        else:
+            with open(pid_file_path, 'w') as f:
+                f.write(str(os.getpid()))
+            return True
+    except Exception as e:
+        return True
+
+def _is_process_running(pid):
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        try:
+            if os.name == 'nt':
+                import subprocess
+                output = subprocess.check_output(f'tasklist /FI "PID eq {pid}"', shell=True, text=True)
+                return str(pid) in output
+            else:
+                os.kill(pid, 0)
+                return True
+        except:
+            return False
+
+def _is_jianke_process(pid, name):
+    try:
+        import psutil
+        process = psutil.Process(pid)
+        process_name = process.name().lower()
+        script_name = os.path.basename(sys.argv[0]).lower()
+        return name.lower() in process_name or script_name in process_name
+    except:
+        return True
+
+def show_single_instance_notification(QApplication, name, version):
+    app_instance = QApplication.instance()
+    if app_instance is None:
+        app_instance = QApplication(sys.argv)
+    tray_icon = QSystemTrayIcon()
+    icon_bytes = base64.b64decode(icon_base64)
+    pixmap = QtGui.QPixmap()
+    pixmap.loadFromData(icon_bytes)
+    tray_icon.setIcon(QtGui.QIcon(pixmap))
+    if tray_icon.isSystemTrayAvailable():
+        tray_icon.show()
+        tray_icon.showMessage(f'{name} v{version}', '程序已经在运行中，请不要重复启动！', QSystemTrayIcon.Warning, 1500)
+        QTimer.singleShot(2000, app_instance.quit)
+        app_instance.exec_()
+    else:
+        print('程序已经在运行中，请不要重复启动！')
 
 def translation_api(input_chinese_content, input_language, translation_language, appid, secretKey):
     translation_results = input_information = ''
@@ -138,17 +223,6 @@ class UpdateDownloadWorker(QThread):
             self.download_finished.emit(file_path, '')
         except Exception as e:
             self.download_finished.emit('', str(e))
-
-def get_ollama_models(server_url):
-    try:
-        response = requests.get(f'{self.server_url}/api/tags', timeout=10)
-        response.raise_for_status()
-        models_data = response.json()
-        model_names = [model['name'] for model in models_data.get('models', [])]
-        return model_names
-    except Exception as e:
-        print(f'获取模型列表失败: {e}')
-        return []
 
 class OllamaAigc(object):
 
@@ -343,10 +417,14 @@ class NamingResultWidget(QWidget):
     def copy_result(self):
         self.copy_callback(self.result)
 
-class VariableNameTranslatorUI(QMainWindow):
+class MainUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        if not check_single_instance_with_file(name):
+            show_single_instance_notification(QApplication, name, version)
+            QApplication.quit()
+            sys.exit(0)
         self.translation_worker = None
         self.model_refresh_worker = None
         self.update_check_worker = None
@@ -355,15 +433,17 @@ class VariableNameTranslatorUI(QMainWindow):
         self.naming_results = []
         self.config = self.load_config()
         self.init_ui()
+        self.tray_icon = None
+        self.init_tray_icon()
         QTimer.singleShot(100, self.auto_refresh_models)
         self.init_shortcuts()
         if self.config.get('auto_update', True):
             QTimer.singleShot(2000, self.check_for_updates)
 
     def init_ui(self):
-        self.setWindowTitle(f'{name}')
-        self.setGeometry(100, 100, 600, 888)
-        self.setMinimumSize(600, 800)
+        self.setWindowTitle(f'{name} v{version}')
+        self.setGeometry(100, 100, 580, 700)
+        self.setMinimumSize(580, 550)
         try:
             image_data = base64.b64decode(icon_base64)
             pixmap = QPixmap()
@@ -384,14 +464,64 @@ class VariableNameTranslatorUI(QMainWindow):
         settings_tab = self.create_settings_tab()
         tab_widget.addTab(settings_tab, '设置')
         self.statusBar().showMessage('就绪')
-        version_label = QLabel(f'<a href="https://github.com/JAINKRE/GrapeCoffee" style="text-decoration: none; color: #7f8c8d;">© 2018-{_year} {name} v{version}</a>')
-        version_label.setAlignment(Qt.AlignCenter)
-        version_label.setStyleSheet('font-size:12px')
-        version_label.setOpenExternalLinks(True)
-        main_layout.addWidget(version_label)
         if self.config.get('always_on_top', False):
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
             self.show()
+
+    def init_tray_icon(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.windowIcon())
+        tray_menu = QMenu()
+        self.toggle_window_action = QAction('查看项目/帮助', self)
+        self.toggle_window_action.triggered.connect(self.open_github_page)
+        tray_menu.addAction(self.toggle_window_action)
+        self.toggle_window_action = QAction('显示/隐藏窗口', self)
+        self.toggle_window_action.triggered.connect(self.toggle_window_visibility)
+        tray_menu.addAction(self.toggle_window_action)
+        tray_menu.addSeparator()
+        quit_action = QAction('退出', self)
+        quit_action.triggered.connect(self.quit_application)
+        tray_menu.addAction(quit_action)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        self.tray_icon.show()
+
+    def toggle_window_visibility(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            self.activateWindow()
+
+    def on_tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            self.toggle_window_visibility()
+
+    def quit_application(self):
+        if self.translation_worker and self.translation_worker.isRunning():
+            self.translation_worker.is_cancelled = True
+            self.translation_worker.quit()
+            self.translation_worker.wait()
+        if self.model_refresh_worker and self.model_refresh_worker.isRunning():
+            self.model_refresh_worker.quit()
+            self.model_refresh_worker.wait()
+        if self.update_check_worker and self.update_check_worker.isRunning():
+            self.update_check_worker.quit()
+            self.update_check_worker.wait()
+        if self.update_download_worker and self.update_download_worker.isRunning():
+            self.update_download_worker.is_cancelled = True
+            self.update_download_worker.quit()
+            self.update_download_worker.wait()
+        if self.tray_icon:
+            self.tray_icon.hide()
+        QApplication.quit()
+
+    def change_theme(self, theme_name):
+        if theme_name:
+            QApplication.setStyle(QStyleFactory.create(theme_name))
+            self.config['theme'] = theme_name
 
     def create_translation_tab(self):
         tab = QWidget()
@@ -399,10 +529,29 @@ class VariableNameTranslatorUI(QMainWindow):
         layout.setSpacing(15)
         input_group = QGroupBox('输入变量名')
         input_layout = QVBoxLayout(input_group)
+        input_row_layout = QHBoxLayout()
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText('请输入中文变量名，如：用户信息')
+        self.input_edit.setPlaceholderText('请输入中文变量名，如：葡萄咖啡')
         self.input_edit.returnPressed.connect(self.start_translation)
-        input_layout.addWidget(self.input_edit)
+        input_row_layout.addWidget(self.input_edit)
+        auto_copy_layout = QHBoxLayout()
+        auto_copy_layout.addWidget(QLabel('翻译后自动复制:'))
+        self.auto_copy_combo = QComboBox()
+        self.auto_copy_combo.addItem('不自动复制', -1)
+        self.auto_copy_combo.addItem('1.私有成员', 0)
+        self.auto_copy_combo.addItem('2.特殊方法', 1)
+        self.auto_copy_combo.addItem('3.驼峰命名法', 2)
+        self.auto_copy_combo.addItem('4.帕斯卡命名法', 3)
+        self.auto_copy_combo.addItem('5.蛇形命名法', 4)
+        self.auto_copy_combo.addItem('6.匈牙利命名法', 5)
+        self.auto_copy_combo.addItem('7.烤肉串命名法', 6)
+        self.auto_copy_combo.addItem('8.常量命名法', 7)
+        auto_copy_index = self.config.get('auto_copy_index', -1)
+        if auto_copy_index >= -1 and auto_copy_index <= 7:
+            self.auto_copy_combo.setCurrentIndex(auto_copy_index + 1)
+        auto_copy_layout.addWidget(self.auto_copy_combo)
+        input_row_layout.addLayout(auto_copy_layout)
+        input_layout.addLayout(input_row_layout)
         mode_group = QGroupBox('翻译模式')
         mode_layout = QHBoxLayout(mode_group)
         self.api_radio = QRadioButton('API翻译')
@@ -417,9 +566,21 @@ class VariableNameTranslatorUI(QMainWindow):
         mode_layout.addWidget(self.api_radio)
         mode_layout.addWidget(self.model_radio)
         mode_layout.addStretch()
-        self.current_model_label = QLabel()
-        mode_layout.addWidget(self.current_model_label)
-        self.model_radio.toggled.connect(self.update_current_model_label)
+        model_layout = QHBoxLayout()
+        model_layout.addStretch()
+        model_layout.addWidget(QLabel('模型名称:'))
+        self.translation_model_combo = QComboBox()
+        models = self.config.get('ollama_models', [''])
+        self.translation_model_combo.addItems(models)
+        current_model = self.config.get('ollama_model', '')
+        if current_model in models:
+            self.translation_model_combo.setCurrentText(current_model)
+        else:
+            self.translation_model_combo.setEditText(current_model)
+        self.translation_model_combo.setMinimumWidth(200)
+        model_layout.addWidget(self.translation_model_combo)
+        mode_layout.addLayout(model_layout)
+        self.translation_model_combo.currentTextChanged.connect(self.sync_model_combo)
         prefix_suffix_group = QGroupBox('变量前缀和后缀')
         prefix_suffix_layout = QHBoxLayout(prefix_suffix_group)
         self.prefix_edit = QLineEdit()
@@ -482,9 +643,20 @@ class VariableNameTranslatorUI(QMainWindow):
         layout.addStretch()
         return tab
 
+    def sync_model_combo(self, text):
+        if hasattr(self, 'model_combo'):
+            self.model_combo.blockSignals(True)
+            self.model_combo.setEditText(text)
+            self.model_combo.blockSignals(False)
+
     def create_settings_tab(self):
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet('\n            QScrollArea {\n                border: none;\n                background: transparent;\n            }\n            QScrollArea > QWidget > QWidget {\n                background: transparent;\n            }\n        ')
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(15)
         ollama_group = QGroupBox('Ollama大模型设置')
         ollama_layout = QVBoxLayout(ollama_group)
@@ -496,7 +668,6 @@ class VariableNameTranslatorUI(QMainWindow):
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel('模型名称:'))
         self.model_combo = QComboBox()
-        self.model_combo.setEditable(True)
         self.model_combo.setPlaceholderText('请选择或输入模型名称')
         models = self.config.get('ollama_models')
         self.model_combo.addItems(models)
@@ -540,6 +711,7 @@ class VariableNameTranslatorUI(QMainWindow):
         self.prompt_edit = QTextEdit()
         self.prompt_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.prompt_edit.setStyleSheet('\n            QTextEdit {\n                border: 1px solid #bdc3c7;\n                border-radius: 4px;\n                font-family: Consolas;\n            }\n        ')
+        self.prompt_edit.setMinimumHeight(150)
         prompt_template = self.config.get('ollama_prompt_template', 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.')
         self.prompt_edit.setPlainText(prompt_template)
         prompt_layout.addWidget(self.prompt_edit)
@@ -559,36 +731,74 @@ class VariableNameTranslatorUI(QMainWindow):
         self.key_edit = QLineEdit(self.config.get('baidu_secretKey', ''))
         key_layout.addWidget(self.key_edit)
         api_layout.addLayout(key_layout)
-        settings_layout = QHBoxLayout()
+        theme_group = QGroupBox('主题设置')
+        theme_layout = QVBoxLayout(theme_group)
+        theme_layout.addWidget(QLabel('请下拉选择主题:'))
+        self.theme_combo = NoWheelComboBox()
+        available_styles = QStyleFactory.keys()
+        self.theme_combo.addItems(available_styles)
+        current_theme = self.config.get('theme', QApplication.style().objectName())
+        if current_theme in available_styles:
+            self.theme_combo.setCurrentText(current_theme)
+        else:
+            self.theme_combo.setCurrentText(available_styles[0] if available_styles else '')
+        self.theme_combo.currentTextChanged.connect(self.change_theme)
+        theme_layout.addWidget(self.theme_combo)
+        theme_note = QLabel('主题将自动跟随系统颜色实现亮暗切换（如果支持），保存后重启生效🙂')
+        theme_note.setStyleSheet('color: #999999; font-size: 12px;')
+        theme_layout.addWidget(theme_note)
         window_group = QGroupBox('窗口设置')
         window_layout = QVBoxLayout(window_group)
         self.always_on_top_checkbox = QCheckBox('窗口置顶')
         self.always_on_top_checkbox.setChecked(self.config.get('always_on_top', False))
         self.always_on_top_checkbox.toggled.connect(self.toggle_always_on_top)
         window_layout.addWidget(self.always_on_top_checkbox)
+        self.minimize_to_tray_checkbox = QCheckBox('关闭时最小化到托盘')
+        self.minimize_to_tray_checkbox.setChecked(self.config.get('minimize_to_tray', True))
+        window_layout.addWidget(self.minimize_to_tray_checkbox)
+        tray_note = QLabel('启用后，点击关闭按钮将隐藏到系统托盘而不是退出程序')
+        tray_note.setStyleSheet('color: #999999; font-size: 12px;')
+        window_layout.addWidget(tray_note)
         update_group = QGroupBox('更新设置')
         update_layout = QHBoxLayout(update_group)
-        update_layout.addWidget(QLabel('启动时自动检查更新:'))
+        update_layout.addWidget(QLabel('自动更新:'))
         self.auto_update_checkbox = QCheckBox()
         self.auto_update_checkbox.setChecked(self.config.get('auto_update', True))
         update_layout.addWidget(self.auto_update_checkbox)
-        self.check_update_btn = QPushButton('立即检查更新')
+        self.check_update_btn = QPushButton('检查更新')
         self.check_update_btn.clicked.connect(self.check_for_updates)
         update_layout.addWidget(self.check_update_btn)
+        update_layout.addStretch()
+        about_group = QGroupBox('关于')
+        about_layout = QVBoxLayout(about_group)
+        about_text = QLabel(f'\n        <p><b>{name} v{version}</b></p>\n        <p>智能变量名翻译工具，支持多种命名规范，可帮助开发者快速生成符合规范的变量名。</p>\n        <p>支持翻译API和Ollama大模型两种翻译方式，提供丰富的自定义选项。</p>\n        <p>© 2025-{_year} 保留所有权</p>\n        <div></div>\n        ')
+        about_text.setWordWrap(True)
+        about_layout.addWidget(about_text)
+        button_layout = QHBoxLayout()
         self.view_project_btn = QPushButton('查看项目')
         self.view_project_btn.clicked.connect(self.open_github_page)
-        update_layout.addWidget(self.view_project_btn)
-        update_layout.addStretch()
-        settings_layout.addWidget(window_group)
-        settings_layout.addWidget(update_group)
+        self.view_project_btn.setFixedWidth(100)
+        button_layout.addWidget(self.view_project_btn)
+        self.donate_btn = QPushButton('赞赏支持')
+        self.donate_btn.clicked.connect(self.show_donate_dialog)
+        self.donate_btn.setFixedWidth(100)
+        button_layout.addWidget(self.donate_btn)
+        self.view_project_btn = QPushButton('建议反馈')
+        self.view_project_btn.clicked.connect(self.open_github_issue_page)
+        self.view_project_btn.setFixedWidth(100)
+        button_layout.addWidget(self.view_project_btn)
+        about_layout.addLayout(button_layout)
         shortcut_group = QGroupBox('快捷键设置')
         shortcut_layout = QVBoxLayout(shortcut_group)
-        self.enable_shortcuts_checkbox = QCheckBox('启用快捷键 (Ctrl+Alt+数字键)')
+        self.enable_shortcuts_checkbox = QCheckBox('启用快捷键 (仅应用内生效)')
         self.enable_shortcuts_checkbox.setChecked(self.config.get('enable_shortcuts', True))
         shortcut_layout.addWidget(self.enable_shortcuts_checkbox)
+        shortcut_note = QLabel('使用 Ctrl+s 保存设置')
+        shortcut_layout.addWidget(shortcut_note)
         shortcut_note = QLabel('使用 Ctrl+Alt+数字键 复制对应序号的变量名:')
         shortcut_layout.addWidget(shortcut_note)
         self.shortcut_table = QTableWidget(8, 2)
+        self.shortcut_table.setMinimumHeight(200)
         self.shortcut_table.setHorizontalHeaderLabels(['快捷键', '变量命名规则'])
         self.shortcut_table.verticalHeader().setVisible(False)
         self.shortcut_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -611,29 +821,78 @@ class VariableNameTranslatorUI(QMainWindow):
         layout.addWidget(ollama_group)
         layout.addWidget(api_group)
         layout.addWidget(shortcut_group)
-        layout.addLayout(settings_layout)
+        layout.addWidget(theme_group)
+        layout.addWidget(window_group)
+        layout.addWidget(update_group)
+        layout.addWidget(about_group)
         layout.addLayout(button_layout)
-        self.update_current_model_label()
-        self.model_combo.currentTextChanged.connect(self.update_current_model_label)
+        layout.addStretch()
+        scroll_area.setWidget(content_widget)
+        main_layout = QVBoxLayout(tab)
+        main_layout.addWidget(scroll_area)
+        self.model_combo.currentTextChanged.connect(self.sync_translation_model_combo)
         return tab
+
+    def show_donate_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('赞赏支持')
+        dialog.setFixedSize(380, 450)
+        layout = QVBoxLayout(dialog)
+        title_label = QLabel('赞赏支持')
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet('font-size: 16px; font-weight: bold; margin: 10px;')
+        layout.addWidget(title_label)
+        description_label = QLabel('项目本身是开源免费无偿的\n如果对您有帮助，欢迎赞赏支持！')
+        description_label.setWordWrap(True)
+        description_label.setAlignment(Qt.AlignCenter)
+        description_label.setStyleSheet('margin: 10px;')
+        layout.addWidget(description_label)
+        qr_layout = QHBoxLayout()
+        wx_layout = QVBoxLayout()
+        wx_label = QLabel('微信支付')
+        wx_label.setAlignment(Qt.AlignCenter)
+        try:
+            wx_image_data = base64.b64decode(wxpay_base64)
+            wx_pixmap = QPixmap()
+            wx_pixmap.loadFromData(wx_image_data)
+            wx_pixmap = wx_pixmap.scaled(350, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            wx_image_label = QLabel()
+            wx_image_label.setPixmap(wx_pixmap)
+            wx_image_label.setAlignment(Qt.AlignCenter)
+            wx_layout.addWidget(wx_image_label)
+        except Exception as e:
+            wx_image_label = QLabel('无法加载微信二维码')
+            wx_image_label.setAlignment(Qt.AlignCenter)
+            wx_layout.addWidget(wx_image_label)
+        wx_layout.addWidget(wx_label)
+        qr_layout.addLayout(wx_layout)
+        layout.addLayout(qr_layout)
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+        dialog.exec()
+
+    def sync_translation_model_combo(self, text):
+        if hasattr(self, 'translation_model_combo'):
+            self.translation_model_combo.blockSignals(True)
+            self.translation_model_combo.setEditText(text)
+            self.translation_model_combo.blockSignals(False)
 
     def open_github_page(self):
         import webbrowser
         try:
             webbrowser.open('https://github.com/JAINKRE/GrapeCoffee')
-            self.statusBar().showMessage('正在打开GitHub项目页面...')
+            self.statusBar().showMessage('正在打开项目页面...')
         except Exception as e:
             QMessageBox.critical(self, '错误', f'无法打开浏览器: {str(e)}')
 
-    def update_current_model_label(self):
-        if hasattr(self, 'model_combo') and self.model_radio.isChecked():
-            current_model = self.model_combo.currentText()
-            if current_model:
-                self.current_model_label.setText(f'当前模型: {current_model}')
-            else:
-                self.current_model_label.setText('当前模型: 未选择')
-        elif hasattr(self, 'model_combo'):
-            self.current_model_label.setText('')
+    def open_github_issue_page(self):
+        import webbrowser
+        try:
+            webbrowser.open('https://github.com/JAINKRE/GrapeCoffee/issues')
+            self.statusBar().showMessage('正在打开项目issue页面...')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'无法打开浏览器: {str(e)}')
 
     def toggle_always_on_top(self, checked):
         if checked:
@@ -650,6 +909,9 @@ class VariableNameTranslatorUI(QMainWindow):
             shortcut = QShortcut(QKeySequence(f'Ctrl+Alt+{i}'), self)
             shortcut.activated.connect(lambda idx=i: self.copy_result_by_index(idx - 1))
             self.shortcuts.append(shortcut)
+        save_shortcut = QShortcut(QKeySequence('Ctrl+S'), self)
+        save_shortcut.activated.connect(self.save_settings)
+        self.shortcuts.append(save_shortcut)
 
     def copy_result_by_index(self, index):
         if not self.config.get('enable_shortcuts', True):
@@ -678,11 +940,17 @@ class VariableNameTranslatorUI(QMainWindow):
             current_text = self.model_combo.currentText()
             self.model_combo.clear()
             self.model_combo.addItems(model_names)
+            if hasattr(self, 'translation_model_combo'):
+                self.translation_model_combo.clear()
+                self.translation_model_combo.addItems(model_names)
             if current_text in model_names:
                 self.model_combo.setCurrentText(current_text)
+                if hasattr(self, 'translation_model_combo'):
+                    self.translation_model_combo.setCurrentText(current_text)
             elif model_names:
                 self.model_combo.setCurrentIndex(0)
-            self.update_current_model_label()
+                if hasattr(self, 'translation_model_combo'):
+                    self.translation_model_combo.setCurrentIndex(0)
             self.statusBar().showMessage(f'自动刷新模型列表成功，共 {len(model_names)} 个模型')
 
     def refresh_models(self):
@@ -702,17 +970,25 @@ class VariableNameTranslatorUI(QMainWindow):
         self.refresh_btn.setText('刷新模型列表')
         if error:
             self.model_combo.clear()
+            if hasattr(self, 'translation_model_combo'):
+                self.translation_model_combo.clear()
             QMessageBox.critical(self, '刷新失败', f'获取模型列表时出错: {error}')
             self.statusBar().showMessage('获取模型列表失败')
         else:
             current_text = self.model_combo.currentText()
             self.model_combo.clear()
             self.model_combo.addItems(model_names)
+            if hasattr(self, 'translation_model_combo'):
+                self.translation_model_combo.clear()
+                self.translation_model_combo.addItems(model_names)
             if current_text in model_names:
                 self.model_combo.setCurrentText(current_text)
+                if hasattr(self, 'translation_model_combo'):
+                    self.translation_model_combo.setCurrentText(current_text)
             elif model_names:
                 self.model_combo.setCurrentIndex(0)
-            self.update_current_model_label()
+                if hasattr(self, 'translation_model_combo'):
+                    self.translation_model_combo.setCurrentIndex(0)
             QMessageBox.information(self, '刷新成功', f'成功获取到 {len(model_names)} 个模型')
             self.statusBar().showMessage(f'模型列表更新成功，共 {len(model_names)} 个模型')
 
@@ -797,7 +1073,7 @@ class VariableNameTranslatorUI(QMainWindow):
         mode = 'API翻译' if self.api_radio.isChecked() else '大模型翻译'
         if mode == '大模型翻译':
             server_url = self.server_edit.text().strip()
-            model_name = self.model_combo.currentText().strip()
+            model_name = self.translation_model_combo.currentText().strip()
             if not server_url:
                 QMessageBox.warning(self, '配置错误', '请在设置中配置Ollama服务器地址')
                 return
@@ -811,7 +1087,7 @@ class VariableNameTranslatorUI(QMainWindow):
         self.statusBar().showMessage('正在翻译...')
         self.clear_results()
         self.raw_output_text.clear()
-        ollama_config = {'server': self.server_edit.text().strip(), 'model': self.model_combo.currentText().strip(), 'temperature': float(self.temp_edit.text().strip() or '0.0'), 'timeout': int(self.timeout_edit.text().strip() or '60'), 'stream': self.stream_checkbox.isChecked(), 'prompt_template': self.prompt_edit.toPlainText()}
+        ollama_config = {'server': self.server_edit.text().strip(), 'model': self.translation_model_combo.currentText().strip(), 'temperature': float(self.temp_edit.text().strip() or '0.0'), 'timeout': int(self.timeout_edit.text().strip() or '60'), 'stream': self.stream_checkbox.isChecked(), 'prompt_template': self.prompt_edit.toPlainText()}
         api_config = {'appid': self.appid_edit.text().strip(), 'secretKey': self.key_edit.text().strip()}
         self.translation_worker = TranslationWorker(mode, input_text, ollama_config, api_config)
         self.translation_worker.translation_finished.connect(self.on_translation_finished)
@@ -851,6 +1127,13 @@ class VariableNameTranslatorUI(QMainWindow):
         words = [word.lower() for word in cleaned_result.split() if word]
         self.display_results(words)
         self.statusBar().showMessage('翻译完成')
+        auto_copy_index = self.auto_copy_combo.currentIndex() - 1
+        if auto_copy_index >= 0 and auto_copy_index < len(self.naming_results):
+            try:
+                Clipboard().set(self.naming_results[auto_copy_index])
+                self.statusBar().showMessage(f"已自动复制 '{self.naming_results[auto_copy_index]}' 到剪贴板")
+            except Exception as e:
+                QMessageBox.critical(self, '复制失败', f'自动复制到剪贴板失败: {str(e)}')
 
     def reset_ui_state(self):
         self.translate_btn.setEnabled(True)
@@ -874,14 +1157,14 @@ class VariableNameTranslatorUI(QMainWindow):
             result = converter.convert_warr(words, func)
             if prefix:
                 if title in ['私有成员', '特殊方法']:
-                    result = prefix.lower() + result
+                    result = prefix + result
                 else:
-                    result = prefix.lower() + '_' + result
+                    result = prefix + '' + result
             if suffix:
                 if title in ['私有成员', '特殊方法']:
-                    result = result + suffix.lower()
+                    result = result + suffix
                 else:
-                    result = result + '_' + suffix.lower()
+                    result = result + '' + suffix
             self.add_result_widget(i, title, result)
             self.naming_results.append(result)
 
@@ -907,6 +1190,11 @@ class VariableNameTranslatorUI(QMainWindow):
             current_model = self.config['ollama_model']
             if current_model in models:
                 self.model_combo.setCurrentText(current_model)
+            if hasattr(self, 'translation_model_combo'):
+                self.translation_model_combo.clear()
+                self.translation_model_combo.addItems(models)
+                if current_model in models:
+                    self.translation_model_combo.setCurrentText(current_model)
             self.temp_edit.setText(str(self.config['ollama_temperature']))
             self.timeout_edit.setText(str(self.config['ollama_timeout']))
             self.stream_checkbox.setChecked(self.config['ollama_stream'])
@@ -914,17 +1202,23 @@ class VariableNameTranslatorUI(QMainWindow):
             self.appid_edit.setText(self.config['baidu_appid'])
             self.key_edit.setText(self.config['baidu_secretKey'])
             self.always_on_top_checkbox.setChecked(self.config['always_on_top'])
+            self.minimize_to_tray_checkbox.setChecked(self.config['minimize_to_tray'])
             self.enable_shortcuts_checkbox.setChecked(self.config['enable_shortcuts'])
             self.auto_update_checkbox.setChecked(self.config['auto_update'])
+            auto_copy_index = self.config.get('auto_copy_index', -1)
+            if auto_copy_index >= -1 and auto_copy_index <= 7:
+                self.auto_copy_combo.setCurrentIndex(auto_copy_index + 1)
             self.toggle_always_on_top(self.config['always_on_top'])
-            self.update_current_model_label()
             QMessageBox.information(self, '恢复默认', '已恢复默认设置')
             self.statusBar().showMessage('已恢复默认设置')
 
     def save_settings(self):
         self.config['default_mode'] = '大模型翻译' if self.model_radio.isChecked() else 'API翻译'
         self.config['ollama_server'] = self.server_edit.text().strip()
-        self.config['ollama_model'] = self.model_combo.currentText().strip()
+        if hasattr(self, 'translation_model_combo'):
+            self.config['ollama_model'] = self.translation_model_combo.currentText().strip()
+        else:
+            self.config['ollama_model'] = self.model_combo.currentText().strip()
         self.config['ollama_temperature'] = float(self.temp_edit.text().strip() or '0.0')
         self.config['ollama_timeout'] = int(self.timeout_edit.text().strip() or '60')
         self.config['ollama_stream'] = self.stream_checkbox.isChecked()
@@ -932,8 +1226,10 @@ class VariableNameTranslatorUI(QMainWindow):
         self.config['baidu_appid'] = self.appid_edit.text().strip()
         self.config['baidu_secretKey'] = self.key_edit.text().strip()
         self.config['always_on_top'] = self.always_on_top_checkbox.isChecked()
+        self.config['minimize_to_tray'] = self.minimize_to_tray_checkbox.isChecked()
         self.config['enable_shortcuts'] = self.enable_shortcuts_checkbox.isChecked()
         self.config['auto_update'] = self.auto_update_checkbox.isChecked()
+        self.config['auto_copy_index'] = self.auto_copy_combo.currentIndex() - 1
         models = []
         for i in range(self.model_combo.count()):
             models.append(self.model_combo.itemText(i))
@@ -947,7 +1243,7 @@ class VariableNameTranslatorUI(QMainWindow):
             QMessageBox.critical(self, '保存失败', f'保存配置失败: {str(e)}')
 
     def get_default_config(self):
-        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'auto_update': True}
+        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'minimize_to_tray': True, 'auto_update': True, 'auto_copy_index': -1}
 
     def load_config(self):
         default_config = self.get_default_config()
@@ -962,29 +1258,38 @@ class VariableNameTranslatorUI(QMainWindow):
             return default_config
 
     def closeEvent(self, event):
-        if self.translation_worker and self.translation_worker.isRunning():
-            self.translation_worker.is_cancelled = True
-            self.translation_worker.quit()
-            self.translation_worker.wait()
-        if self.model_refresh_worker and self.model_refresh_worker.isRunning():
-            self.model_refresh_worker.quit()
-            self.model_refresh_worker.wait()
-        if self.update_check_worker and self.update_check_worker.isRunning():
-            self.update_check_worker.quit()
-            self.update_check_worker.wait()
-        if self.update_download_worker and self.update_download_worker.isRunning():
-            self.update_download_worker.is_cancelled = True
-            self.update_download_worker.quit()
-            self.update_download_worker.wait()
-        event.accept()
+        if self.config.get('minimize_to_tray', True) and self.tray_icon:
+            self.hide()
+            event.ignore()
+        else:
+            if self.translation_worker and self.translation_worker.isRunning():
+                self.translation_worker.is_cancelled = True
+                self.translation_worker.quit()
+                self.translation_worker.wait()
+            if self.model_refresh_worker and self.model_refresh_worker.isRunning():
+                self.model_refresh_worker.quit()
+                self.model_refresh_worker.wait()
+            if self.update_check_worker and self.update_check_worker.isRunning():
+                self.update_check_worker.quit()
+                self.update_check_worker.wait()
+            if self.update_download_worker and self.update_download_worker.isRunning():
+                self.update_download_worker.is_cancelled = True
+                self.update_download_worker.quit()
+                self.update_download_worker.wait()
+            if self.tray_icon:
+                self.tray_icon.hide()
+            event.accept()
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    window = VariableNameTranslatorUI()
+    window = MainUI()
+    saved_theme = window.config.get('theme')
+    if saved_theme and saved_theme in QStyleFactory.keys():
+        app.setStyle(QStyleFactory.create(saved_theme))
     window.show()
     sys.exit(app.exec())
 if __name__ == '__main__':
     name = 'GrapeCoffee 智能变量名助手'
-    version = '2.1.3'
+    version = '2.1.4'
     main()
