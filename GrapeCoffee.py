@@ -17,7 +17,7 @@ import win32con
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QButtonGroup, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QStyleFactory, QSystemTrayIcon, QMenu, QApplication
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor, QAction, QIcon
-from config import icon_base64, wxpay_base64
+from config import icon_base64, wxpay_base64, SUPPORTED_OLLAMA_VERSIONS
 import base64
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6 import QtGui
@@ -139,7 +139,7 @@ def translation_api(input_chinese_content, input_language, translation_language,
     myurl = myurl + '?q=' + urllib.parse.quote(input_chinese_content) + '&from=' + input_language + '&to=' + translation_language + '&appid=' + appid + '&salt=' + str(salt) + '&sign=' + sign
     try:
         cache = httplib2.Http('C:\\GrapeCoffee\\\\API_baidu\\\\cache')
-        (_response, content) = cache.request(myurl)
+        _response, content = cache.request(myurl)
         if _response.status == 200:
             _response = json.loads(content.decode('utf-8'))
             translation_results = _response['trans_result'][0]['dst']
@@ -224,6 +224,23 @@ class UpdateDownloadWorker(QThread):
         except Exception as e:
             self.download_finished.emit('', str(e))
 
+class VersionCheckWorker(QThread):
+    version_checked = Signal(str, str)
+
+    def __init__(self, server_url, parent=None):
+        super().__init__(parent)
+        self.server_url = server_url
+
+    def run(self):
+        try:
+            response = requests.get(f'{self.server_url}/api/version', timeout=10)
+            response.raise_for_status()
+            version_data = response.json()
+            version = version_data.get('version', '')
+            self.version_checked.emit(version, '')
+        except Exception as e:
+            self.version_checked.emit('', str(e))
+
 class OllamaAigc(object):
 
     def __init__(self, _send_chat_url, _model, _stream, _temperature, _prompt_template, _timeout=60):
@@ -240,12 +257,7 @@ class OllamaAigc(object):
         payload = {'model': self.model, 'messages': messages, 'stream': self.stream, 'temperature': self.temperature}
         try:
             response = requests.post(self.send_chat_url, json=payload, timeout=self.timeout, stream=self.stream)
-            if self.stream:
-                return response
-            else:
-                response.raise_for_status()
-                chat_response = response.json()
-                return chat_response
+            return response
         except requests.exceptions.RequestException as e:
             return None
 
@@ -328,7 +340,7 @@ class TranslationWorker(QThread):
                 TranslationLanguage = 'en'
                 appid = self.api_config.get('appid', '')
                 secretKey = self.api_config.get('secretKey', '')
-                (TranslationResults, InputInformation) = translation_api(self.input_text, InputLanguage, TranslationLanguage, appid, secretKey)
+                TranslationResults, InputInformation = translation_api(self.input_text, InputLanguage, TranslationLanguage, appid, secretKey)
                 if TranslationResults is None:
                     self.translation_finished.emit('', InputInformation, '')
                     return
@@ -348,6 +360,7 @@ class TranslationWorker(QThread):
                     return
                 if stream:
                     full_response = ''
+                    thinking_content = ''
                     for line in response.iter_lines():
                         if self.is_cancelled:
                             return
@@ -360,19 +373,29 @@ class TranslationWorker(QThread):
                                         break
                                     try:
                                         data = json.loads(json_str)
-                                        if 'message' in data and 'content' in data['message']:
-                                            chunk = data['message']['content']
-                                            full_response += chunk
-                                            self.stream_chunk_received.emit(chunk)
+                                        if 'message' in data:
+                                            if 'thinking' in data['message'] and data['message']['thinking']:
+                                                thinking_chunk = data['message']['thinking']
+                                                thinking_content += thinking_chunk
+                                                self.stream_chunk_received.emit(f'[THINKING]{thinking_chunk}')
+                                            if 'content' in data['message'] and data['message']['content']:
+                                                chunk = data['message']['content']
+                                                full_response += chunk
+                                                self.stream_chunk_received.emit(f'[CONTENT]{chunk}')
                                     except json.JSONDecodeError:
                                         pass
                                 else:
                                     try:
                                         data = json.loads(decoded_line)
-                                        if 'message' in data and 'content' in data['message']:
-                                            chunk = data['message']['content']
-                                            full_response += chunk
-                                            self.stream_chunk_received.emit(chunk)
+                                        if 'message' in data:
+                                            if 'thinking' in data['message'] and data['message']['thinking']:
+                                                thinking_chunk = data['message']['thinking']
+                                                thinking_content += thinking_chunk
+                                                self.stream_chunk_received.emit(f'[THINKING]{thinking_chunk}')
+                                            if 'content' in data['message'] and data['message']['content']:
+                                                chunk = data['message']['content']
+                                                full_response += chunk
+                                                self.stream_chunk_received.emit(f'[CONTENT]{chunk}')
                                     except json.JSONDecodeError:
                                         pass
                             except UnicodeDecodeError:
@@ -433,6 +456,7 @@ class MainUI(QMainWindow):
         self.naming_results = []
         self.config = self.load_config()
         self.init_ui()
+        self.version_check_worker = None
         self.tray_icon = None
         self.init_tray_icon()
         QTimer.singleShot(100, self.auto_refresh_models)
@@ -719,6 +743,21 @@ class MainUI(QMainWindow):
         prompt_note.setStyleSheet('color: #999999; font-size: 12px;')
         prompt_layout.addWidget(prompt_note)
         ollama_layout.addLayout(prompt_layout)
+        version_layout = QVBoxLayout()
+        version_label = QLabel('支持的Ollama版本:')
+        version_layout.addWidget(version_label)
+        supported_versions_text = ', '.join(SUPPORTED_OLLAMA_VERSIONS)
+        supported_versions_label = QLabel(supported_versions_text)
+        supported_versions_label.setWordWrap(True)
+        supported_versions_label.setStyleSheet('color: #666666; font-size: 12px;')
+        version_layout.addWidget(supported_versions_label)
+        self.enable_version_check_checkbox = QCheckBox('翻译时启用版本兼容性检查')
+        self.enable_version_check_checkbox.setChecked(self.config.get('enable_version_check', True))
+        version_layout.addWidget(self.enable_version_check_checkbox)
+        self.current_version_label = QLabel('当前版本: 未检查')
+        self.current_version_label.setStyleSheet('color: #666666; font-size: 12px;')
+        version_layout.addWidget(self.current_version_label)
+        ollama_layout.addLayout(version_layout)
         api_group = QGroupBox('百度翻译 API设置')
         api_layout = QHBoxLayout(api_group)
         appid_layout = QHBoxLayout()
@@ -804,7 +843,7 @@ class MainUI(QMainWindow):
         self.shortcut_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.shortcut_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         shortcut_names = ['Ctrl+Alt+1', 'Ctrl+Alt+2', 'Ctrl+Alt+3', 'Ctrl+Alt+4', 'Ctrl+Alt+5', 'Ctrl+Alt+6', 'Ctrl+Alt+7', 'Ctrl+Alt+8']
-        naming_rules = ['私有成员', '特殊方法', '驼峰命名法 (camelCase)', '帕斯卡命名法 (PascalCase)', '蛇形命名法 (snake_case)', '匈牙利命名法', '烤肉串命名法 (kebab-case)', '常量命名法 (CONSTANT_CASE)']
+        naming_rules = ['私有成员 _privateMember', '特殊方法 __special__method__', '驼峰命名法 camelCase', '帕斯卡命名法 PascalCase', '蛇形命名法 snake_case', '匈牙利命名法 strHungarianConvention', '烤肉串命名法 kebab-case', '常量命名法 CONSTANT_CASE']
         for i in range(8):
             self.shortcut_table.setItem(i, 0, QTableWidgetItem(shortcut_names[i]))
             self.shortcut_table.setItem(i, 1, QTableWidgetItem(naming_rules[i]))
@@ -961,9 +1000,9 @@ class MainUI(QMainWindow):
         self.refresh_btn.setEnabled(False)
         self.refresh_btn.setText('刷新中...')
         self.statusBar().showMessage('正在获取模型列表...')
-        self.model_refresh_worker = ModelRefreshWorker(server_url)
-        self.model_refresh_worker.refresh_finished.connect(self.on_model_refresh_finished)
-        self.model_refresh_worker.start()
+        self.version_check_worker = VersionCheckWorker(server_url)
+        self.version_check_worker.version_checked.connect(self.on_version_checked)
+        self.version_check_worker.start()
 
     def on_model_refresh_finished(self, model_names, error):
         self.refresh_btn.setEnabled(True)
@@ -991,6 +1030,27 @@ class MainUI(QMainWindow):
                     self.translation_model_combo.setCurrentIndex(0)
             QMessageBox.information(self, '刷新成功', f'成功获取到 {len(model_names)} 个模型')
             self.statusBar().showMessage(f'模型列表更新成功，共 {len(model_names)} 个模型')
+
+    def on_version_checked(self, version, error):
+        if error:
+            self.current_version_label.setText(f'当前版本: 检查失败 ({error})')
+            self.current_version_label.setStyleSheet('color: #ff0000; font-size: 12px;')
+        else:
+            self.current_version_label.setText(f'当前版本: {version}')
+            if version in SUPPORTED_OLLAMA_VERSIONS:
+                self.current_version_label.setStyleSheet('color: #00aa00; font-size: 12px;')
+            else:
+                self.current_version_label.setStyleSheet('color: #ff6600; font-size: 12px;')
+                QMessageBox.warning(self, '版本不兼容提示', f"检测到您使用的Ollama版本：{version}，该版本可能不完全兼容。\n\n建议使用以下任意Ollama版本:\n {', '.join(SUPPORTED_OLLAMA_VERSIONS)}\n\n")
+        self.continue_model_refresh()
+
+    def continue_model_refresh(self):
+        server_url = self.server_edit.text().strip()
+        if not server_url:
+            return
+        self.model_refresh_worker = ModelRefreshWorker(server_url)
+        self.model_refresh_worker.refresh_finished.connect(self.on_model_refresh_finished)
+        self.model_refresh_worker.start()
 
     def check_for_updates(self):
         self.check_update_btn.setEnabled(False)
@@ -1080,6 +1140,31 @@ class MainUI(QMainWindow):
             if not model_name:
                 QMessageBox.warning(self, '配置错误', '请选择或输入模型名称')
                 return
+            self.check_ollama_version_before_translation(server_url, input_text)
+            return
+        self.execute_translation(input_text, mode)
+
+    def check_ollama_version_before_translation(self, server_url, input_text):
+        if not self.enable_version_check_checkbox.isChecked():
+            self.execute_translation(input_text, '大模型翻译')
+            return
+        try:
+            response = requests.get(f'{server_url}/api/version', timeout=5)
+            response.raise_for_status()
+            version_data = response.json()
+            version = version_data.get('version', '')
+            if version in SUPPORTED_OLLAMA_VERSIONS:
+                self.execute_translation(input_text, '大模型翻译')
+            else:
+                reply = QMessageBox.warning(self, '版本不兼容提示', f"检测到您使用的Ollama版本：{version}，该版本可能不完全兼容。\n\n建议使用以下任意Ollama版本:\n {', '.join(SUPPORTED_OLLAMA_VERSIONS)}\n\n是否继续翻译？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.execute_translation(input_text, '大模型翻译')
+        except Exception as e:
+            reply = QMessageBox.warning(self, '版本检查失败', f'无法检查Ollama版本: {str(e)}\n\n是否继续翻译？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.execute_translation(input_text, '大模型翻译')
+
+    def execute_translation(self, input_text, mode):
         self.translate_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
@@ -1096,7 +1181,26 @@ class MainUI(QMainWindow):
         self.translation_worker.start()
 
     def on_stream_chunk_received(self, chunk):
-        self.raw_output_text.insertPlainText(chunk)
+        show_thinking = self.config.get('show_thinking', True) if hasattr(self, 'config') else True
+        if chunk.startswith('[THINKING]'):
+            if show_thinking:
+                thinking_text = chunk[10:]
+                self.raw_output_text.setTextColor(Qt.gray)
+                self.raw_output_text.setFontItalic(True)
+                self.raw_output_text.insertPlainText(f'{thinking_text}')
+                self._has_thinking_output = True
+        elif chunk.startswith('[CONTENT]'):
+            if show_thinking and getattr(self, '_has_thinking_output', False):
+                self.raw_output_text.insertPlainText('\n')
+                self._has_thinking_output = False
+            content_text = chunk[9:]
+            self.raw_output_text.setTextColor(Qt.green)
+            self.raw_output_text.setFontItalic(False)
+            self.raw_output_text.insertPlainText(content_text)
+        else:
+            self.raw_output_text.setTextColor(Qt.green)
+            self.raw_output_text.setFontItalic(False)
+            self.raw_output_text.insertPlainText(chunk)
         cursor = self.raw_output_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.raw_output_text.setTextCursor(cursor)
@@ -1153,7 +1257,7 @@ class MainUI(QMainWindow):
         suffix = self.suffix_edit.text().strip()
         converter = Convert()
         naming_rules = [('私有成员', converter.case_01), ('特殊方法', converter.case_02), ('驼峰命名法', converter.case_03), ('帕斯卡命名法', converter.case_04), ('蛇形命名法', converter.case_05), ('匈牙利命名法', converter.case_06), ('烤肉串命名法', converter.case_07), ('常量命名法', converter.case_08)]
-        for (i, (title, func)) in enumerate(naming_rules):
+        for i, (title, func) in enumerate(naming_rules):
             result = converter.convert_warr(words, func)
             if prefix:
                 if title in ['私有成员', '特殊方法']:
@@ -1229,6 +1333,7 @@ class MainUI(QMainWindow):
         self.config['minimize_to_tray'] = self.minimize_to_tray_checkbox.isChecked()
         self.config['enable_shortcuts'] = self.enable_shortcuts_checkbox.isChecked()
         self.config['auto_update'] = self.auto_update_checkbox.isChecked()
+        self.config['enable_version_check'] = self.enable_version_check_checkbox.isChecked()
         self.config['auto_copy_index'] = self.auto_copy_combo.currentIndex() - 1
         models = []
         for i in range(self.model_combo.count()):
@@ -1243,7 +1348,7 @@ class MainUI(QMainWindow):
             QMessageBox.critical(self, '保存失败', f'保存配置失败: {str(e)}')
 
     def get_default_config(self):
-        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'minimize_to_tray': True, 'auto_update': True, 'auto_copy_index': -1}
+        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'minimize_to_tray': True, 'auto_update': True, 'enable_version_check': True, 'auto_copy_index': -1}
 
     def load_config(self):
         default_config = self.get_default_config()
@@ -1291,5 +1396,5 @@ def main():
     sys.exit(app.exec())
 if __name__ == '__main__':
     name = 'GrapeCoffee 智能变量名助手'
-    version = '2.1.4'
+    version = '2.1.5'
     main()
