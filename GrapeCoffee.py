@@ -1,45 +1,49 @@
 # -*- coding:utf-8 -*-
-# Suzhou Jainkre Electronic Technologies Co.,Ltd. (c)2018-2025
+# Suzhou Jainkre Electronic Technologies Co.,Ltd. (c)2018-2026
 import sys
 import json
 import random
 import urllib
 import re
-from datetime import datetime
-from hashlib import md5
-from typing import List, Callable
 import os
+import atexit
 import tempfile
 import httplib2
 import requests
-import win32clipboard as w
 import win32con
-from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QButtonGroup, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QStyleFactory, QSystemTrayIcon, QMenu, QApplication
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor, QAction, QIcon
-from config import icon_base64, wxpay_base64, SUPPORTED_OLLAMA_VERSIONS
 import base64
+import win32clipboard as w
+from datetime import datetime
+from hashlib import md5
+from typing import List, Callable
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QGroupBox, QRadioButton, QMessageBox, QProgressBar, QTabWidget, QScrollArea, QSizePolicy, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QStyleFactory, QSystemTrayIcon, QMenu
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut, QTextCursor, QAction
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6 import QtGui
+from config import icon_base64, wxpay_base64, SUPPORTED_OLLAMA_VERSIONS
 _year = datetime.now().year
 CONFIG_FILE = os.path.join(os.path.expanduser('~'), '.GrapeCoffee_config.json')
 
 class JeikuClass(object):
 
-    def gettime(self):
+    @staticmethod
+    def gettime():
         tm = '%Y{y}%m{m}%d{d} %H{h}%M{m1}%S{s}'
         return datetime.now().strftime(tm).format(y='-', m='-', d='', h=':', m1=':', s='')
 jclass = JeikuClass()
 
 class Clipboard(object):
 
-    def get(self):
+    @staticmethod
+    def get():
         w.OpenClipboard()
         board_values = w.GetClipboardData(win32con.CF_UNICODETEXT)
         w.CloseClipboard()
         return board_values
 
-    def set(self, a_string):
+    @staticmethod
+    def set(a_string):
         w.OpenClipboard()
         w.EmptyClipboard()
         w.SetClipboardData(win32con.CF_UNICODETEXT, a_string)
@@ -56,17 +60,18 @@ class NoWheelComboBox(QComboBox):
 def check_single_instance_with_file(name):
     try:
         pid_file_path = os.path.join(tempfile.gettempdir(), f'{name}.pid')
+        atexit.register(_cleanup_pid_file, pid_file_path)
         if os.path.exists(pid_file_path):
             with open(pid_file_path, 'r') as f:
                 try:
                     pid = int(f.read().strip())
                 except ValueError:
                     os.remove(pid_file_path)
-                    with open(pid_file_path, 'w') as f:
-                        f.write(str(os.getpid()))
+                    with open(pid_file_path, 'w') as file:
+                        file.write(str(os.getpid()))
                     return True
             if _is_process_running(pid):
-                if _is_jianke_process(pid, name):
+                if _is_jainkre_process(pid, name):
                     return False
                 else:
                     os.remove(pid_file_path)
@@ -82,8 +87,18 @@ def check_single_instance_with_file(name):
             with open(pid_file_path, 'w') as f:
                 f.write(str(os.getpid()))
             return True
-    except Exception as e:
+    except Exception as _:
         return True
+
+def _cleanup_pid_file(pid_file_path):
+    try:
+        if os.path.exists(pid_file_path):
+            with open(pid_file_path, 'r') as f:
+                content = f.read().strip()
+                if content == str(os.getpid()):
+                    os.remove(pid_file_path)
+    except Exception:
+        pass
 
 def _is_process_running(pid):
     try:
@@ -101,7 +116,7 @@ def _is_process_running(pid):
         except:
             return False
 
-def _is_jianke_process(pid, name):
+def _is_jainkre_process(pid, name):
     try:
         import psutil
         process = psutil.Process(pid)
@@ -128,17 +143,19 @@ def show_single_instance_notification(QApplication, name, version):
     else:
         print('程序已经在运行中，请不要重复启动！')
 
-def translation_api(input_chinese_content, input_language, translation_language, appid, secretKey):
+def translation_api(input_chinese_content, input_language, translation_language, appid, secret_key):
     translation_results = input_information = ''
     myurl = 'https://api.fanyi.baidu.com/api/trans/vip/translate'
     salt = random.randint(111111, 999999)
-    sign = appid + input_chinese_content + str(salt) + secretKey
+    sign = appid + input_chinese_content + str(salt) + secret_key
     m1 = md5()
     m1.update(sign.encode())
     sign = m1.hexdigest()
     myurl = myurl + '?q=' + urllib.parse.quote(input_chinese_content) + '&from=' + input_language + '&to=' + translation_language + '&appid=' + appid + '&salt=' + str(salt) + '&sign=' + sign
     try:
-        cache = httplib2.Http('C:\\GrapeCoffee\\\\API_baidu\\\\cache')
+        cache_dir = os.path.join(tempfile.gettempdir(), 'GrapeCoffee_API_cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        cache = httplib2.Http(cache_dir)
         _response, content = cache.request(myurl)
         if _response.status == 200:
             _response = json.loads(content.decode('utf-8'))
@@ -164,6 +181,24 @@ class ModelRefreshWorker(QThread):
             response.raise_for_status()
             models_data = response.json()
             model_names = [model['name'] for model in models_data.get('models', [])]
+            self.refresh_finished.emit(model_names, '')
+        except Exception as e:
+            self.refresh_finished.emit([], str(e))
+
+class OpenAIModelRefreshWorker(QThread):
+    refresh_finished = Signal(list, str)
+
+    def __init__(self, api_key, base_url, parent=None):
+        super().__init__(parent)
+        self.api_key = api_key
+        self.base_url = base_url
+
+    def run(self):
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=self.api_key, base_url=self.base_url if self.base_url else None)
+            models_response = client.models.list()
+            model_names = [model.id for model in models_response.data]
             self.refresh_finished.emit(model_names, '')
         except Exception as e:
             self.refresh_finished.emit([], str(e))
@@ -261,9 +296,31 @@ class OllamaAigc(object):
         except requests.exceptions.RequestException as e:
             return None
 
+class OpenAIAigc(object):
+
+    def __init__(self, _api_key, _model, _stream, _temperature, _prompt_template, _base_url=None, _timeout=60):
+        from openai import OpenAI
+        self.api_key = _api_key
+        self.model = _model
+        self.stream = _stream
+        self.temperature = _temperature
+        self.prompt_template = _prompt_template
+        self.timeout = _timeout
+        self.client = OpenAI(api_key=_api_key, base_url=_base_url if _base_url else None)
+
+    def send_chat_request(self, translate_word):
+        prompt = self.prompt_template.format(translate_word=translate_word)
+        messages = [{'role': 'user', 'content': prompt}]
+        try:
+            response = self.client.chat.completions.create(model=self.model, messages=messages, stream=self.stream, temperature=self.temperature, timeout=self.timeout)
+            return response
+        except Exception as e:
+            return None
+
 class Convert(object):
 
-    def case_01(self, words):
+    @staticmethod
+    def case_01(words):
         if not words:
             return ''
         camel_case = '_' + words[0].lower()
@@ -271,13 +328,15 @@ class Convert(object):
             camel_case += word.capitalize()
         return camel_case
 
-    def case_02(self, words):
+    @staticmethod
+    def case_02(words):
         if not words:
             return ''
         special_method = '__' + '__'.join(words).lower() + '__'
         return special_method
 
-    def case_03(self, words):
+    @staticmethod
+    def case_03(words):
         if not words:
             return ''
         camel_case = words[0].lower()
@@ -285,38 +344,78 @@ class Convert(object):
             camel_case += word.capitalize()
         return camel_case
 
-    def case_04(self, words):
+    @staticmethod
+    def case_04(words):
         if not words:
             return ''
         pascal_case = ''.join((word.capitalize() for word in words))
         return pascal_case
 
-    def case_05(self, words):
+    @staticmethod
+    def case_05(words):
         if not words:
             return ''
         snake_case = '_'.join((word.lower() for word in words))
         return snake_case
 
-    def case_06(self, words):
+    @staticmethod
+    def case_06(words):
         if not words:
             return ''
-        type_prefix = 'str'
-        variable_name = ''.join((word.capitalize() for word in words))
-        return f'{type_prefix}{variable_name}'
+        dot_case = '.'.join((word.lower() for word in words))
+        return dot_case
 
-    def case_07(self, words):
+    @staticmethod
+    def case_07(words):
+        if not words:
+            return ''
+        upper_snake_case = '_'.join((word.upper() for word in words))
+        return upper_snake_case
+
+    @staticmethod
+    def case_08(words):
+        if not words:
+            return ''
+        uppercase_case = ''.join((word.upper() for word in words))
+        return uppercase_case
+
+    @staticmethod
+    def case_09(words):
+        if not words:
+            return ''
+        path_case = '/'.join((word.lower() for word in words))
+        return path_case
+
+    @staticmethod
+    def case_10(words):
         if not words:
             return ''
         kebab_case = '-'.join((word.lower() for word in words))
         return kebab_case
 
-    def case_08(self, words):
+    @staticmethod
+    def case_11(words):
         if not words:
             return ''
-        constants_case = '_'.join((word.upper() for word in words))
-        return constants_case
+        train_case = '-'.join((word.capitalize() for word in words))
+        return train_case
 
-    def convert_warr(self, _warr, naming_func):
+    @staticmethod
+    def case_12(words):
+        if not words:
+            return ''
+        camel_snake_case = '_'.join((word.capitalize() for word in words))
+        return camel_snake_case
+
+    @staticmethod
+    def case_13(words):
+        if not words:
+            return ''
+        screaming_kebab_case = '-'.join((word.upper() for word in words))
+        return screaming_kebab_case
+
+    @staticmethod
+    def convert_warr(_warr, naming_func):
         return naming_func(_warr)
 
 class TranslationWorker(QThread):
@@ -324,11 +423,12 @@ class TranslationWorker(QThread):
     progress_updated = Signal(int)
     stream_chunk_received = Signal(str)
 
-    def __init__(self, mode, input_text, ollama_config=None, api_config=None, parent=None):
+    def __init__(self, mode, input_text, ollama_config=None, openai_config=None, api_config=None, parent=None):
         super().__init__(parent)
         self.mode = mode
         self.input_text = input_text
         self.ollama_config = ollama_config or {}
+        self.openai_config = openai_config or {}
         self.api_config = api_config or {}
         self.is_cancelled = False
 
@@ -336,17 +436,17 @@ class TranslationWorker(QThread):
         try:
             self.progress_updated.emit(20)
             if self.mode == 'API翻译':
-                InputLanguage = 'auto'
-                TranslationLanguage = 'en'
+                input_language = 'auto'
+                translation_language = 'en'
                 appid = self.api_config.get('appid', '')
-                secretKey = self.api_config.get('secretKey', '')
-                TranslationResults, InputInformation = translation_api(self.input_text, InputLanguage, TranslationLanguage, appid, secretKey)
-                if TranslationResults is None:
-                    self.translation_finished.emit('', InputInformation, '')
+                secret_key_api = self.api_config.get('secretKey', '')
+                translation_results, input_information = translation_api(self.input_text, input_language, translation_language, appid, secret_key_api)
+                if translation_results is None:
+                    self.translation_finished.emit('', input_information, '')
                     return
-                result = TranslationResults
+                result = translation_results
                 raw_response = ''
-            else:
+            elif self.mode == 'Ollama翻译':
                 ollama_server = self.ollama_config.get('server')
                 model = self.ollama_config.get('model')
                 stream = self.ollama_config.get('stream', False)
@@ -364,6 +464,7 @@ class TranslationWorker(QThread):
                     for line in response.iter_lines():
                         if self.is_cancelled:
                             return
+                        self.msleep(5)
                         if line:
                             try:
                                 decoded_line = line.decode('utf-8')
@@ -407,6 +508,36 @@ class TranslationWorker(QThread):
                     data = response.json()
                     result = data['message']['content'].replace('_', ' ')
                     raw_response = data['message']['content']
+            else:
+                api_key = self.openai_config.get('api_key')
+                base_url = self.openai_config.get('base_url')
+                model = self.openai_config.get('model')
+                stream = self.openai_config.get('stream', False)
+                temperature = self.openai_config.get('temperature')
+                prompt_template = self.openai_config.get('prompt_template')
+                timeout = self.openai_config.get('timeout', 600)
+                response = OpenAIAigc(api_key, model, stream, temperature, prompt_template, base_url, timeout).send_chat_request(self.input_text)
+                if response is None:
+                    self.translation_finished.emit('', 'OpenAI接口调用失败，请检查API Key和模型是否正确', '')
+                    return
+                if stream:
+                    full_response = ''
+                    for chunk in response:
+                        if self.is_cancelled:
+                            return
+                        self.msleep(5)
+                        try:
+                            if chunk.choices[0].delta.content:
+                                content = chunk.choices[0].delta.content
+                                full_response += content
+                                self.stream_chunk_received.emit(f'[CONTENT]{content}')
+                        except (AttributeError, IndexError):
+                            pass
+                    result = full_response.replace('_', ' ')
+                    raw_response = full_response
+                else:
+                    result = response.choices[0].message.content.replace('_', ' ')
+                    raw_response = response.choices[0].message.content
             self.progress_updated.emit(100)
             self.translation_finished.emit(result, '', raw_response)
         except Exception as e:
@@ -450,10 +581,14 @@ class MainUI(QMainWindow):
             sys.exit(0)
         self.translation_worker = None
         self.model_refresh_worker = None
+        self.openai_model_refresh_worker = None
         self.update_check_worker = None
         self.update_download_worker = None
         self.shortcuts = []
         self.naming_results = []
+        self._has_thinking_output = False
+        self._in_thinking_block = False
+        self._auto_refreshing = False
         self.config = self.load_config()
         self.init_ui()
         self.version_check_worker = None
@@ -523,7 +658,7 @@ class MainUI(QMainWindow):
         if reason == QSystemTrayIcon.Trigger:
             self.toggle_window_visibility()
 
-    def quit_application(self):
+    def _cleanup_workers(self):
         if self.translation_worker and self.translation_worker.isRunning():
             self.translation_worker.is_cancelled = True
             self.translation_worker.quit()
@@ -531,6 +666,12 @@ class MainUI(QMainWindow):
         if self.model_refresh_worker and self.model_refresh_worker.isRunning():
             self.model_refresh_worker.quit()
             self.model_refresh_worker.wait()
+        if self.openai_model_refresh_worker and self.openai_model_refresh_worker.isRunning():
+            self.openai_model_refresh_worker.quit()
+            self.openai_model_refresh_worker.wait()
+        if self.version_check_worker and self.version_check_worker.isRunning():
+            self.version_check_worker.quit()
+            self.version_check_worker.wait()
         if self.update_check_worker and self.update_check_worker.isRunning():
             self.update_check_worker.quit()
             self.update_check_worker.wait()
@@ -540,6 +681,9 @@ class MainUI(QMainWindow):
             self.update_download_worker.wait()
         if self.tray_icon:
             self.tray_icon.hide()
+
+    def quit_application(self):
+        self._cleanup_workers()
         QApplication.quit()
 
     def change_theme(self, theme_name):
@@ -561,50 +705,111 @@ class MainUI(QMainWindow):
         auto_copy_layout = QHBoxLayout()
         auto_copy_layout.addWidget(QLabel('翻译后自动复制:'))
         self.auto_copy_combo = QComboBox()
+        self.auto_copy_combo.setStyleSheet("\n            QComboBox {\n                font-family: 'Courier New', monospace;\n            }\n            QComboBox QAbstractItemView {\n                font-family: 'Courier New', monospace;\n            }\n        ")
         self.auto_copy_combo.addItem('不自动复制', -1)
         self.auto_copy_combo.addItem('1.私有成员', 0)
         self.auto_copy_combo.addItem('2.特殊方法', 1)
         self.auto_copy_combo.addItem('3.驼峰命名法', 2)
         self.auto_copy_combo.addItem('4.帕斯卡命名法', 3)
         self.auto_copy_combo.addItem('5.蛇形命名法', 4)
-        self.auto_copy_combo.addItem('6.匈牙利命名法', 5)
-        self.auto_copy_combo.addItem('7.烤肉串命名法', 6)
-        self.auto_copy_combo.addItem('8.常量命名法', 7)
+        self.auto_copy_combo.addItem('6.点分隔命名法', 5)
+        self.auto_copy_combo.addItem('7.大写蛇形命名法', 6)
+        self.auto_copy_combo.addItem('8.全大写无分隔', 7)
+        self.auto_copy_combo.addItem('9.路径分隔命名法', 8)
+        self.auto_copy_combo.addItem('10.串式命名法', 9)
+        self.auto_copy_combo.addItem('11.标题命名法', 10)
+        self.auto_copy_combo.addItem('12.驼峰蛇形命名法', 11)
+        self.auto_copy_combo.addItem('13.大写串式命名法', 12)
         auto_copy_index = self.config.get('auto_copy_index', -1)
-        if auto_copy_index >= -1 and auto_copy_index <= 7:
+        if -1 <= auto_copy_index <= 12:
             self.auto_copy_combo.setCurrentIndex(auto_copy_index + 1)
-        auto_copy_layout.addWidget(self.auto_copy_combo)
+        auto_copy_layout.addWidget(self.auto_copy_combo, 1)
         input_row_layout.addLayout(auto_copy_layout)
         input_layout.addLayout(input_row_layout)
         mode_group = QGroupBox('翻译模式')
-        mode_layout = QHBoxLayout(mode_group)
+        mode_layout = QVBoxLayout(mode_group)
+        translation_type_layout = QHBoxLayout()
+        translation_type_layout.addWidget(QLabel('翻译方式:'))
         self.api_radio = QRadioButton('API翻译')
-        self.model_radio = QRadioButton('大模型翻译')
-        if self.config.get('default_mode', '大模型翻译') == '大模型翻译':
-            self.model_radio.setChecked(True)
-        else:
-            self.api_radio.setChecked(True)
-        mode_group_box = QButtonGroup()
-        mode_group_box.addButton(self.api_radio, 1)
-        mode_group_box.addButton(self.model_radio, 2)
-        mode_layout.addWidget(self.api_radio)
-        mode_layout.addWidget(self.model_radio)
-        mode_layout.addStretch()
+        self.llm_radio = QRadioButton('大模型翻译')
+        translation_type_layout.addWidget(self.api_radio)
+        translation_type_layout.addWidget(self.llm_radio)
+        provider_layout = QHBoxLayout()
+        self.ollama_provider_radio = QRadioButton('Ollama')
+        self.openai_provider_radio = QRadioButton('OpenAI')
+        self.ollama_provider_radio.setChecked(True)
+        provider_layout.addWidget(self.ollama_provider_radio)
+        provider_layout.addWidget(self.openai_provider_radio)
+        self.provider_widget = QWidget()
+        self.provider_widget.setLayout(provider_layout)
+        translation_type_layout.addWidget(self.provider_widget)
+        translation_type_layout.addStretch()
+        mode_layout.addLayout(translation_type_layout)
         model_layout = QHBoxLayout()
-        model_layout.addStretch()
         model_layout.addWidget(QLabel('模型名称:'))
         self.translation_model_combo = QComboBox()
-        models = self.config.get('ollama_models', [''])
-        self.translation_model_combo.addItems(models)
-        current_model = self.config.get('ollama_model', '')
-        if current_model in models:
-            self.translation_model_combo.setCurrentText(current_model)
+        self.translation_model_combo.setStyleSheet("\n            QComboBox {\n                font-family: 'Courier New', monospace;\n            }\n            QComboBox QAbstractItemView {\n                font-family: 'Courier New', monospace;\n            }\n        ")
+        default_provider = self.config.get('llm_provider', 'ollama')
+        if default_provider == 'openai':
+            self.openai_provider_radio.setChecked(True)
+            self.ollama_provider_radio.setChecked(False)
+            models = self.config.get('openai_models', [''])
+            current_model = self.config.get('openai_model', '')
         else:
-            self.translation_model_combo.setEditText(current_model)
-        self.translation_model_combo.setMinimumWidth(200)
-        model_layout.addWidget(self.translation_model_combo)
-        mode_layout.addLayout(model_layout)
+            self.ollama_provider_radio.setChecked(True)
+            self.openai_provider_radio.setChecked(False)
+            models = self.config.get('ollama_models', [''])
+            current_model = self.config.get('ollama_model', '')
+        self.translation_model_combo.addItems(models)
+        if current_model and current_model in models:
+            self.translation_model_combo.setCurrentText(current_model)
+        elif models and models[0]:
+            self.translation_model_combo.setCurrentIndex(0)
+        else:
+            self.translation_model_combo.setEditText(current_model if current_model else '')
+        self.translation_model_combo.setFixedHeight(24)
+        model_layout.addWidget(self.translation_model_combo, 1)
+        self.translation_refresh_btn = QPushButton('刷新模型')
+        self.translation_refresh_btn.setFixedWidth(80)
+        self.translation_refresh_btn.setFixedHeight(24)
+        self.translation_refresh_btn.clicked.connect(self.refresh_translation_models)
+        model_layout.addWidget(self.translation_refresh_btn)
+        self.model_selection_widget = QWidget()
+        self.model_selection_widget.setLayout(model_layout)
+        mode_layout.addWidget(self.model_selection_widget)
+
+        def update_llm_visibility():
+            is_llm_mode = self.llm_radio.isChecked()
+            self.provider_widget.setVisible(is_llm_mode)
+            self.model_selection_widget.setVisible(is_llm_mode)
+        self.api_radio.toggled.connect(update_llm_visibility)
+        self.llm_radio.toggled.connect(update_llm_visibility)
+
+        def update_model_list():
+            if self.llm_radio.isChecked():
+                if self.openai_provider_radio.isChecked():
+                    models = self.config.get('openai_models', [''])
+                    current_model = self.config.get('openai_model', '')
+                else:
+                    models = self.config.get('ollama_models', [''])
+                    current_model = self.config.get('ollama_model', '')
+                self.translation_model_combo.blockSignals(True)
+                self.translation_model_combo.clear()
+                self.translation_model_combo.addItems(models)
+                if current_model in models:
+                    self.translation_model_combo.setCurrentText(current_model)
+                else:
+                    self.translation_model_combo.setEditText(current_model)
+                self.translation_model_combo.blockSignals(False)
+        self.ollama_provider_radio.toggled.connect(update_model_list)
+        self.openai_provider_radio.toggled.connect(update_model_list)
+        if self.config.get('default_mode', '大模型翻译') == '大模型翻译':
+            self.llm_radio.setChecked(True)
+        else:
+            self.api_radio.setChecked(True)
+        update_llm_visibility()
         self.translation_model_combo.currentTextChanged.connect(self.sync_model_combo)
+        self.translation_model_combo.currentTextChanged.connect(self._on_translation_model_changed)
         prefix_suffix_group = QGroupBox('变量前缀和后缀')
         prefix_suffix_layout = QHBoxLayout(prefix_suffix_group)
         self.prefix_edit = QLineEdit()
@@ -670,7 +875,7 @@ class MainUI(QMainWindow):
     def sync_model_combo(self, text):
         if hasattr(self, 'model_combo'):
             self.model_combo.blockSignals(True)
-            self.model_combo.setEditText(text)
+            self.model_combo.setCurrentText(text)
             self.model_combo.blockSignals(False)
 
     def create_settings_tab(self):
@@ -693,6 +898,7 @@ class MainUI(QMainWindow):
         model_layout.addWidget(QLabel('模型名称:'))
         self.model_combo = QComboBox()
         self.model_combo.setPlaceholderText('请选择或输入模型名称')
+        self.model_combo.setStyleSheet("\n            QComboBox {\n                font-family: 'Courier New', monospace;\n            }\n            QComboBox QAbstractItemView {\n                font-family: 'Courier New', monospace;\n            }\n        ")
         models = self.config.get('ollama_models')
         self.model_combo.addItems(models)
         current_model = self.config.get('ollama_model')
@@ -756,8 +962,77 @@ class MainUI(QMainWindow):
         version_layout.addWidget(self.enable_version_check_checkbox)
         self.current_version_label = QLabel('当前版本: 未检查')
         self.current_version_label.setStyleSheet('color: #666666; font-size: 12px;')
+        self.current_version_label.setWordWrap(True)
         version_layout.addWidget(self.current_version_label)
         ollama_layout.addLayout(version_layout)
+        openai_group = QGroupBox('OpenAI API设置')
+        openai_layout = QVBoxLayout(openai_group)
+        api_key_layout = QHBoxLayout()
+        api_key_layout.addWidget(QLabel('API Key:'))
+        self.openai_api_key_edit = QLineEdit(self.config.get('openai_api_key', ''))
+        self.openai_api_key_edit.setEchoMode(QLineEdit.Password)
+        api_key_layout.addWidget(self.openai_api_key_edit)
+        openai_layout.addLayout(api_key_layout)
+        base_url_layout = QHBoxLayout()
+        base_url_layout.addWidget(QLabel('模型地址:'))
+        self.openai_base_url_edit = QLineEdit(self.config.get('openai_base_url', 'https://api.openai.com/v1'))
+        base_url_layout.addWidget(self.openai_base_url_edit)
+        openai_layout.addLayout(base_url_layout)
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel('模型名称:'))
+        self.openai_model_combo = QComboBox()
+        self.openai_model_combo.setPlaceholderText('请选择或输入模型名称')
+        self.openai_model_combo.setStyleSheet("\n            QComboBox {\n                font-family: 'Courier New', monospace;\n            }\n            QComboBox QAbstractItemView {\n                font-family: 'Courier New', monospace;\n            }\n        ")
+        openai_models = self.config.get('openai_models', [])
+        self.openai_model_combo.addItems(openai_models)
+        current_openai_model = self.config.get('openai_model', '')
+        if current_openai_model in openai_models:
+            self.openai_model_combo.setCurrentText(current_openai_model)
+        else:
+            self.openai_model_combo.setEditText(current_openai_model)
+        self.openai_refresh_btn = QPushButton('刷新模型列表')
+        self.openai_refresh_btn.clicked.connect(self.refresh_openai_models)
+        self.openai_refresh_btn.setFixedWidth(100)
+        model_layout.addWidget(self.openai_model_combo, 1)
+        model_layout.addWidget(self.openai_refresh_btn)
+        openai_layout.addLayout(model_layout)
+        params_layout = QHBoxLayout()
+        temp_layout = QHBoxLayout()
+        temp_label = QLabel('温度参数:')
+        self.openai_temp_edit = QLineEdit(str(self.config.get('openai_temperature', 0.0)))
+        self.openai_temp_edit.setFixedWidth(100)
+        temp_layout.addWidget(temp_label)
+        temp_layout.addWidget(self.openai_temp_edit)
+        params_layout.addLayout(temp_layout)
+        timeout_layout = QHBoxLayout()
+        timeout_label = QLabel('请求超时(秒):')
+        self.openai_timeout_edit = QLineEdit(str(self.config.get('openai_timeout', 60)))
+        self.openai_timeout_edit.setFixedWidth(100)
+        timeout_layout.addWidget(timeout_label)
+        timeout_layout.addWidget(self.openai_timeout_edit)
+        params_layout.addLayout(timeout_layout)
+        stream_layout = QHBoxLayout()
+        stream_layout.addWidget(QLabel('流式输出:'))
+        self.openai_stream_checkbox = QCheckBox('启用')
+        self.openai_stream_checkbox.setChecked(self.config.get('openai_stream', False))
+        stream_layout.addWidget(self.openai_stream_checkbox)
+        params_layout.addLayout(stream_layout)
+        params_layout.addStretch()
+        openai_layout.addLayout(params_layout)
+        prompt_layout = QVBoxLayout()
+        prompt_label = QLabel('提示词模板:')
+        prompt_layout.addWidget(prompt_label)
+        self.openai_prompt_edit = QTextEdit()
+        self.openai_prompt_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.openai_prompt_edit.setStyleSheet('\n            QTextEdit {\n                border: 1px solid #bdc3c7;\n                border-radius: 4px;\n                font-family: Consolas;\n            }\n        ')
+        self.openai_prompt_edit.setMinimumHeight(150)
+        openai_prompt_template = self.config.get('openai_prompt_template', 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.')
+        self.openai_prompt_edit.setPlainText(openai_prompt_template)
+        prompt_layout.addWidget(self.openai_prompt_edit)
+        prompt_note = QLabel('提示：提示词必须包含 `{translate_word}` 以传递输入变量名给大模型')
+        prompt_note.setStyleSheet('color: #999999; font-size: 12px;')
+        prompt_layout.addWidget(prompt_note)
+        openai_layout.addLayout(prompt_layout)
         api_group = QGroupBox('百度翻译 API设置')
         api_layout = QHBoxLayout(api_group)
         appid_layout = QHBoxLayout()
@@ -810,7 +1085,7 @@ class MainUI(QMainWindow):
         update_layout.addStretch()
         about_group = QGroupBox('关于')
         about_layout = QVBoxLayout(about_group)
-        about_text = QLabel(f'\n        <p><b>{name} v{version}</b></p>\n        <p>智能变量名翻译工具，支持多种命名规范，可帮助开发者快速生成符合规范的变量名。</p>\n        <p>支持翻译API和Ollama大模型两种翻译方式，提供丰富的自定义选项。</p>\n        <p>© 2025-{_year} 保留所有权</p>\n        <div></div>\n        ')
+        about_text = QLabel(f'\n        <p><b>{name} v{version}</b></p>\n        <p>智能变量名翻译工具，支持多种命名规范，可帮助开发者快速生成符合规范的变量名。</p>\n        <p>支持翻译API和Ollama/OpenAi大模型两种翻译方式，提供丰富的自定义选项。</p>\n        <p>© 2025-{_year} 保留所有权</p>\n        <div></div>\n        ')
         about_text.setWordWrap(True)
         about_layout.addWidget(about_text)
         button_layout = QHBoxLayout()
@@ -822,10 +1097,10 @@ class MainUI(QMainWindow):
         self.donate_btn.clicked.connect(self.show_donate_dialog)
         self.donate_btn.setFixedWidth(100)
         button_layout.addWidget(self.donate_btn)
-        self.view_project_btn = QPushButton('建议反馈')
-        self.view_project_btn.clicked.connect(self.open_github_issue_page)
-        self.view_project_btn.setFixedWidth(100)
-        button_layout.addWidget(self.view_project_btn)
+        self.feedback_btn = QPushButton('建议反馈')
+        self.feedback_btn.clicked.connect(self.open_github_issue_page)
+        self.feedback_btn.setFixedWidth(100)
+        button_layout.addWidget(self.feedback_btn)
         about_layout.addLayout(button_layout)
         shortcut_group = QGroupBox('快捷键设置')
         shortcut_layout = QVBoxLayout(shortcut_group)
@@ -836,17 +1111,23 @@ class MainUI(QMainWindow):
         shortcut_layout.addWidget(shortcut_note)
         shortcut_note = QLabel('使用 Ctrl+Alt+数字键 复制对应序号的变量名:')
         shortcut_layout.addWidget(shortcut_note)
-        self.shortcut_table = QTableWidget(8, 2)
-        self.shortcut_table.setMinimumHeight(200)
-        self.shortcut_table.setHorizontalHeaderLabels(['快捷键', '变量命名规则'])
+        self.shortcut_table = QTableWidget(13, 4)
+        self.shortcut_table.setMinimumHeight(250)
+        self.shortcut_table.setHorizontalHeaderLabels(['序', '快捷键', '变量命名规则', '示例'])
         self.shortcut_table.verticalHeader().setVisible(False)
         self.shortcut_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.shortcut_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        shortcut_names = ['Ctrl+Alt+1', 'Ctrl+Alt+2', 'Ctrl+Alt+3', 'Ctrl+Alt+4', 'Ctrl+Alt+5', 'Ctrl+Alt+6', 'Ctrl+Alt+7', 'Ctrl+Alt+8']
-        naming_rules = ['私有成员 _privateMember', '特殊方法 __special__method__', '驼峰命名法 camelCase', '帕斯卡命名法 PascalCase', '蛇形命名法 snake_case', '匈牙利命名法 strHungarianConvention', '烤肉串命名法 kebab-case', '常量命名法 CONSTANT_CASE']
-        for i in range(8):
-            self.shortcut_table.setItem(i, 0, QTableWidgetItem(shortcut_names[i]))
-            self.shortcut_table.setItem(i, 1, QTableWidgetItem(naming_rules[i]))
+        self.shortcut_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.shortcut_table.setColumnWidth(0, 24)
+        for col in range(1, 4):
+            self.shortcut_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Stretch)
+        shortcut_names = ['Ctrl+Alt+1', 'Ctrl+Alt+2', 'Ctrl+Alt+3', 'Ctrl+Alt+4', 'Ctrl+Alt+5', 'Ctrl+Alt+6', 'Ctrl+Alt+7', 'Ctrl+Alt+8', 'Ctrl+Alt+9', 'Ctrl+Alt+0', 'Ctrl+Alt+Q', 'Ctrl+Alt+W', 'Ctrl+Alt+E']
+        rule_titles = ['私有成员', '特殊方法', '驼峰命名法', '帕斯卡命名法', '蛇形命名法', '点分隔命名法', '大写蛇形命名法', '全大写无分隔', '路径分隔命名法', '串式命名法', '标题命名法', '驼峰蛇形命名法', '大写串式命名法']
+        rule_examples = ['_privateMember', '__special__method__', 'camelCase', 'PascalCase', 'snake_case', 'dot.case', 'CONSTANT_CASE', 'CONSTANTVARIABLE', 'path/separated', 'kebab-case', 'Train-Case', 'Camel_Snake_Case', 'SCREAMING-KEBAB-CASE']
+        for i in range(13):
+            self.shortcut_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            self.shortcut_table.setItem(i, 1, QTableWidgetItem(shortcut_names[i]))
+            self.shortcut_table.setItem(i, 2, QTableWidgetItem(rule_titles[i]))
+            self.shortcut_table.setItem(i, 3, QTableWidgetItem(rule_examples[i]))
         shortcut_layout.addWidget(self.shortcut_table)
         button_layout = QHBoxLayout()
         restore_btn = QPushButton('恢复默认')
@@ -858,6 +1139,7 @@ class MainUI(QMainWindow):
         button_layout.addWidget(restore_btn)
         button_layout.addWidget(save_btn)
         layout.addWidget(ollama_group)
+        layout.addWidget(openai_group)
         layout.addWidget(api_group)
         layout.addWidget(shortcut_group)
         layout.addWidget(theme_group)
@@ -870,6 +1152,7 @@ class MainUI(QMainWindow):
         main_layout = QVBoxLayout(tab)
         main_layout.addWidget(scroll_area)
         self.model_combo.currentTextChanged.connect(self.sync_translation_model_combo)
+        self.openai_model_combo.currentTextChanged.connect(self.sync_translation_model_combo)
         return tab
 
     def show_donate_dialog(self):
@@ -914,8 +1197,40 @@ class MainUI(QMainWindow):
     def sync_translation_model_combo(self, text):
         if hasattr(self, 'translation_model_combo'):
             self.translation_model_combo.blockSignals(True)
-            self.translation_model_combo.setEditText(text)
+            self.translation_model_combo.setCurrentText(text)
             self.translation_model_combo.blockSignals(False)
+
+    def _on_translation_model_changed(self, model_name):
+        if not model_name or self._auto_refreshing:
+            return
+        provider = 'openai' if self.openai_provider_radio.isChecked() else 'ollama'
+        if provider == 'openai':
+            self.config['openai_model'] = model_name
+        else:
+            self.config['ollama_model'] = model_name
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
+
+    def _display_raw_output_with_thinking(self, raw_response):
+        self.raw_output_text.clear()
+        self.raw_output_text.setReadOnly(False)
+        parts = re.split('(\\<think\\>.*?\\<\\/think\\>)', raw_response, flags=re.DOTALL)
+        for part in parts:
+            if not part:
+                continue
+            think_match = re.match('\\<think\\>(.*)\\<\\/think\\>', part, flags=re.DOTALL)
+            if think_match:
+                self.raw_output_text.setTextColor(Qt.gray)
+                self.raw_output_text.setFontItalic(True)
+                self.raw_output_text.insertPlainText(think_match.group(1))
+            else:
+                self.raw_output_text.setTextColor(Qt.green)
+                self.raw_output_text.setFontItalic(False)
+                self.raw_output_text.insertPlainText(part)
+        self.raw_output_text.setReadOnly(True)
 
     def open_github_page(self):
         import webbrowser
@@ -941,12 +1256,14 @@ class MainUI(QMainWindow):
         self.show()
 
     def init_shortcuts(self):
-        for shortcut in self.shortcuts:
-            shortcut.setEnabled(False)
-        self.shortcuts.clear()
-        for i in range(1, 9):
+        for i in range(1, 10):
             shortcut = QShortcut(QKeySequence(f'Ctrl+Alt+{i}'), self)
             shortcut.activated.connect(lambda idx=i: self.copy_result_by_index(idx - 1))
+            self.shortcuts.append(shortcut)
+        extra_keys = ['0', 'Q', 'W', 'E']
+        for idx_offset, key in enumerate(extra_keys, start=10):
+            shortcut = QShortcut(QKeySequence(f'Ctrl+Alt+{key}'), self)
+            shortcut.activated.connect(lambda idx=idx_offset: self.copy_result_by_index(idx - 1))
             self.shortcuts.append(shortcut)
         save_shortcut = QShortcut(QKeySequence('Ctrl+S'), self)
         save_shortcut.activated.connect(self.save_settings)
@@ -965,32 +1282,75 @@ class MainUI(QMainWindow):
             self.statusBar().showMessage('无效的快捷键索引')
 
     def auto_refresh_models(self):
-        if self.model_radio.isChecked():
-            server_url = self.server_edit.text().strip()
-            if server_url:
-                self.model_refresh_worker = ModelRefreshWorker(server_url)
-                self.model_refresh_worker.refresh_finished.connect(self.on_auto_model_refresh_finished)
-                self.model_refresh_worker.start()
+        if self.llm_radio.isChecked():
+            if self.openai_provider_radio.isChecked():
+                api_key = self.openai_api_key_edit.text().strip()
+                if api_key:
+                    self.openai_model_refresh_worker = OpenAIModelRefreshWorker(api_key, self.openai_base_url_edit.text().strip())
+                    self.openai_model_refresh_worker.refresh_finished.connect(self.on_auto_openai_model_refresh_finished)
+                    self.openai_model_refresh_worker.start()
+            else:
+                server_url = self.server_edit.text().strip()
+                if server_url:
+                    self.model_refresh_worker = ModelRefreshWorker(server_url)
+                    self.model_refresh_worker.refresh_finished.connect(self.on_auto_model_refresh_finished)
+                    self.model_refresh_worker.start()
+
+    def on_auto_openai_model_refresh_finished(self, model_names, error):
+        self._auto_refreshing = True
+        try:
+            if error:
+                QMessageBox.critical(self, '刷新失败', f'自动获取OpenAI模型列表时出错: {error}')
+            else:
+                saved_model = self.config.get('openai_model', '')
+                self.openai_model_combo.blockSignals(True)
+                self.openai_model_combo.clear()
+                self.openai_model_combo.addItems(model_names)
+                self.openai_model_combo.blockSignals(False)
+                if hasattr(self, 'translation_model_combo') and self.openai_provider_radio.isChecked():
+                    self.translation_model_combo.blockSignals(True)
+                    self.translation_model_combo.clear()
+                    self.translation_model_combo.addItems(model_names)
+                    self.translation_model_combo.blockSignals(False)
+                if saved_model in model_names:
+                    self.openai_model_combo.setCurrentText(saved_model)
+                    if hasattr(self, 'translation_model_combo') and self.openai_provider_radio.isChecked():
+                        self.translation_model_combo.setCurrentText(saved_model)
+                elif model_names:
+                    self.openai_model_combo.setCurrentIndex(0)
+                    if hasattr(self, 'translation_model_combo') and self.openai_provider_radio.isChecked():
+                        self.translation_model_combo.setCurrentIndex(0)
+                self.statusBar().showMessage(f'自动刷新OpenAI模型列表成功，共 {len(model_names)} 个模型')
+        finally:
+            self._auto_refreshing = False
 
     def on_auto_model_refresh_finished(self, model_names, error):
-        if error:
-            QMessageBox.critical(self, '刷新失败', f'自动获取模型列表时出错: {error}')
-        else:
-            current_text = self.model_combo.currentText()
-            self.model_combo.clear()
-            self.model_combo.addItems(model_names)
-            if hasattr(self, 'translation_model_combo'):
-                self.translation_model_combo.clear()
-                self.translation_model_combo.addItems(model_names)
-            if current_text in model_names:
-                self.model_combo.setCurrentText(current_text)
-                if hasattr(self, 'translation_model_combo'):
-                    self.translation_model_combo.setCurrentText(current_text)
-            elif model_names:
-                self.model_combo.setCurrentIndex(0)
-                if hasattr(self, 'translation_model_combo'):
-                    self.translation_model_combo.setCurrentIndex(0)
-            self.statusBar().showMessage(f'自动刷新模型列表成功，共 {len(model_names)} 个模型')
+        self._auto_refreshing = True
+        try:
+            if error:
+                QMessageBox.critical(self, '刷新失败', f'自动获取Ollama模型列表时出错: {error}')
+            else:
+                saved_model = self.config.get('ollama_model', '')
+                self.model_combo.blockSignals(True)
+                self.model_combo.clear()
+                self.model_combo.addItems(model_names)
+                self.model_combo.blockSignals(False)
+                if hasattr(self, 'translation_model_combo') and self.ollama_provider_radio.isChecked():
+                    self.translation_model_combo.blockSignals(True)
+                    self.translation_model_combo.clear()
+                    self.translation_model_combo.addItems(model_names)
+                    self.translation_model_combo.blockSignals(False)
+                if saved_model in model_names:
+                    self.model_combo.setCurrentText(saved_model)
+                    if hasattr(self, 'translation_model_combo') and self.ollama_provider_radio.isChecked():
+                        self.translation_model_combo.setCurrentText(saved_model)
+                elif model_names:
+                    self.model_combo.setCurrentIndex(0)
+                    if hasattr(self, 'translation_model_combo') and self.ollama_provider_radio.isChecked():
+                        self.translation_model_combo.setCurrentIndex(0)
+                self.statusBar().showMessage(f'自动刷新Ollama模型列表成功，共 {len(model_names)} 个模型')
+        finally:
+            self._auto_refreshing = False
 
     def refresh_models(self):
         server_url = self.server_edit.text().strip()
@@ -1007,29 +1367,37 @@ class MainUI(QMainWindow):
     def on_model_refresh_finished(self, model_names, error):
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText('刷新模型列表')
-        if error:
-            self.model_combo.clear()
-            if hasattr(self, 'translation_model_combo'):
-                self.translation_model_combo.clear()
-            QMessageBox.critical(self, '刷新失败', f'获取模型列表时出错: {error}')
-            self.statusBar().showMessage('获取模型列表失败')
-        else:
-            current_text = self.model_combo.currentText()
-            self.model_combo.clear()
-            self.model_combo.addItems(model_names)
-            if hasattr(self, 'translation_model_combo'):
-                self.translation_model_combo.clear()
-                self.translation_model_combo.addItems(model_names)
-            if current_text in model_names:
-                self.model_combo.setCurrentText(current_text)
+        self._auto_refreshing = True
+        try:
+            if error:
+                self.model_combo.clear()
                 if hasattr(self, 'translation_model_combo'):
-                    self.translation_model_combo.setCurrentText(current_text)
-            elif model_names:
-                self.model_combo.setCurrentIndex(0)
+                    self.translation_model_combo.clear()
+                QMessageBox.critical(self, '刷新失败', f'获取模型列表时出错: {error}')
+                self.statusBar().showMessage('获取模型列表失败')
+            else:
+                saved_model = self.config.get('ollama_model', '')
+                self.model_combo.blockSignals(True)
+                self.model_combo.clear()
+                self.model_combo.addItems(model_names)
+                self.model_combo.blockSignals(False)
                 if hasattr(self, 'translation_model_combo'):
-                    self.translation_model_combo.setCurrentIndex(0)
-            QMessageBox.information(self, '刷新成功', f'成功获取到 {len(model_names)} 个模型')
-            self.statusBar().showMessage(f'模型列表更新成功，共 {len(model_names)} 个模型')
+                    self.translation_model_combo.blockSignals(True)
+                    self.translation_model_combo.clear()
+                    self.translation_model_combo.addItems(model_names)
+                    self.translation_model_combo.blockSignals(False)
+                if saved_model in model_names:
+                    self.model_combo.setCurrentText(saved_model)
+                    if hasattr(self, 'translation_model_combo'):
+                        self.translation_model_combo.setCurrentText(saved_model)
+                elif model_names:
+                    self.model_combo.setCurrentIndex(0)
+                    if hasattr(self, 'translation_model_combo'):
+                        self.translation_model_combo.setCurrentIndex(0)
+                QMessageBox.information(self, '刷新成功', f'成功获取到 {len(model_names)} 个模型')
+                self.statusBar().showMessage(f'模型列表更新成功，共 {len(model_names)} 个模型')
+        finally:
+            self._auto_refreshing = False
 
     def on_version_checked(self, version, error):
         if error:
@@ -1051,6 +1419,43 @@ class MainUI(QMainWindow):
         self.model_refresh_worker = ModelRefreshWorker(server_url)
         self.model_refresh_worker.refresh_finished.connect(self.on_model_refresh_finished)
         self.model_refresh_worker.start()
+
+    def refresh_openai_models(self):
+        api_key = self.openai_api_key_edit.text().strip()
+        base_url = self.openai_base_url_edit.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, 'API Key错误', '请先输入OpenAI API Key')
+            return
+        self.openai_refresh_btn.setEnabled(False)
+        self.openai_refresh_btn.setText('刷新中...')
+        self.statusBar().showMessage('正在获取OpenAI模型列表...')
+        self.openai_model_refresh_worker = OpenAIModelRefreshWorker(api_key, base_url)
+        self.openai_model_refresh_worker.refresh_finished.connect(self.on_openai_model_refresh_finished)
+        self.openai_model_refresh_worker.start()
+
+    def on_openai_model_refresh_finished(self, model_names, error):
+        self.openai_refresh_btn.setEnabled(True)
+        self.openai_refresh_btn.setText('刷新模型列表')
+        if error:
+            self.openai_model_combo.clear()
+            QMessageBox.critical(self, '刷新失败', f'获取OpenAI模型列表时出错: {error}')
+            self.statusBar().showMessage('获取OpenAI模型列表失败')
+        else:
+            current_text = self.openai_model_combo.currentText()
+            self.openai_model_combo.clear()
+            self.openai_model_combo.addItems(model_names)
+            if current_text in model_names:
+                self.openai_model_combo.setCurrentText(current_text)
+            elif model_names:
+                self.openai_model_combo.setCurrentIndex(0)
+            QMessageBox.information(self, '刷新成功', f'成功获取到 {len(model_names)} 个模型')
+            self.statusBar().showMessage(f'OpenAI模型列表更新成功，共 {len(model_names)} 个模型')
+
+    def refresh_translation_models(self):
+        if self.openai_provider_radio.isChecked():
+            self.refresh_openai_models()
+        else:
+            self.refresh_models()
 
     def check_for_updates(self):
         self.check_update_btn.setEnabled(False)
@@ -1114,11 +1519,13 @@ class MainUI(QMainWindow):
             QMessageBox.critical(self, '下载失败', f'下载更新时出错: {error}')
             self.statusBar().showMessage('下载更新失败')
             return
-        try:
-            os.startfile(file_path)
-            self.close()
-        except Exception as e:
-            QMessageBox.critical(self, '安装失败', f'启动安装程序时出错: {str(e)}')
+        reply = QMessageBox.information(self, '下载完成', f'新版本已下载到:\n{file_path}\n\n是否立即安装？', QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply == QMessageBox.Yes:
+            try:
+                os.startfile(file_path)
+                self.close()
+            except Exception as e:
+                QMessageBox.critical(self, '安装失败', f'启动安装程序时出错: {str(e)}')
 
     def cancel_download(self):
         if self.update_download_worker and self.update_download_worker.isRunning():
@@ -1131,40 +1538,56 @@ class MainUI(QMainWindow):
             QMessageBox.warning(self, '输入错误', '请输入变量名')
             return
         mode = 'API翻译' if self.api_radio.isChecked() else '大模型翻译'
+        provider = 'openai' if self.openai_provider_radio.isChecked() else 'ollama'
         if mode == '大模型翻译':
-            server_url = self.server_edit.text().strip()
             model_name = self.translation_model_combo.currentText().strip()
-            if not server_url:
-                QMessageBox.warning(self, '配置错误', '请在设置中配置Ollama服务器地址')
-                return
-            if not model_name:
-                QMessageBox.warning(self, '配置错误', '请选择或输入模型名称')
-                return
-            self.check_ollama_version_before_translation(server_url, input_text)
-            return
-        self.execute_translation(input_text, mode)
-
-    def check_ollama_version_before_translation(self, server_url, input_text):
-        if not self.enable_version_check_checkbox.isChecked():
-            self.execute_translation(input_text, '大模型翻译')
-            return
-        try:
-            response = requests.get(f'{server_url}/api/version', timeout=5)
-            response.raise_for_status()
-            version_data = response.json()
-            version = version_data.get('version', '')
-            if version in SUPPORTED_OLLAMA_VERSIONS:
-                self.execute_translation(input_text, '大模型翻译')
+            if provider == 'openai':
+                api_key = self.openai_api_key_edit.text().strip()
+                if not api_key:
+                    QMessageBox.warning(self, '配置错误', '请在设置中配置OpenAI API Key')
+                    return
+                if not model_name:
+                    QMessageBox.warning(self, '配置错误', '请选择或输入模型名称')
+                    return
             else:
-                reply = QMessageBox.warning(self, '版本不兼容提示', f"检测到您使用的Ollama版本：{version}，该版本可能不完全兼容。\n\n建议使用以下任意Ollama版本:\n {', '.join(SUPPORTED_OLLAMA_VERSIONS)}\n\n是否继续翻译？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    self.execute_translation(input_text, '大模型翻译')
-        except Exception as e:
-            reply = QMessageBox.warning(self, '版本检查失败', f'无法检查Ollama版本: {str(e)}\n\n是否继续翻译？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.execute_translation(input_text, '大模型翻译')
+                server_url = self.server_edit.text().strip()
+                if not server_url:
+                    QMessageBox.warning(self, '配置错误', '请在设置中配置Ollama服务器地址')
+                    return
+                if not model_name:
+                    QMessageBox.warning(self, '配置错误', '请选择或输入模型名称')
+                    return
+                self.check_ollama_version_before_translation(server_url, input_text, provider)
+                return
+        self.execute_translation(input_text, mode, provider)
 
-    def execute_translation(self, input_text, mode):
+    def check_ollama_version_before_translation(self, server_url, input_text, provider):
+        if not self.enable_version_check_checkbox.isChecked():
+            self.execute_translation(input_text, '大模型翻译', provider)
+            return
+        self._pending_translation_input = input_text
+        self._pending_translation_provider = provider
+        self.statusBar().showMessage('正在检查Ollama版本...')
+        self.version_check_worker = VersionCheckWorker(server_url)
+        self.version_check_worker.version_checked.connect(self._on_pre_translation_version_checked)
+        self.version_check_worker.start()
+
+    def _on_pre_translation_version_checked(self, version, error):
+        input_text = getattr(self, '_pending_translation_input', '')
+        provider = getattr(self, '_pending_translation_provider', 'ollama')
+        if error:
+            reply = QMessageBox.warning(self, '版本检查失败', f'无法检查Ollama版本: {error}\n\n是否继续翻译？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.execute_translation(input_text, '大模型翻译', provider)
+            return
+        if version in SUPPORTED_OLLAMA_VERSIONS:
+            self.execute_translation(input_text, '大模型翻译', provider)
+        else:
+            reply = QMessageBox.warning(self, '版本不兼容提示', f"检测到您使用的Ollama版本：{version}，该版本可能不完全兼容。\n\n建议使用以下任意Ollama版本:\n {', '.join(SUPPORTED_OLLAMA_VERSIONS)}\n\n是否继续翻译？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.execute_translation(input_text, '大模型翻译', provider)
+
+    def execute_translation(self, input_text, mode, provider='ollama'):
         self.translate_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
@@ -1172,9 +1595,17 @@ class MainUI(QMainWindow):
         self.statusBar().showMessage('正在翻译...')
         self.clear_results()
         self.raw_output_text.clear()
+        self._in_thinking_block = False
         ollama_config = {'server': self.server_edit.text().strip(), 'model': self.translation_model_combo.currentText().strip(), 'temperature': float(self.temp_edit.text().strip() or '0.0'), 'timeout': int(self.timeout_edit.text().strip() or '60'), 'stream': self.stream_checkbox.isChecked(), 'prompt_template': self.prompt_edit.toPlainText()}
+        openai_config = {'api_key': self.openai_api_key_edit.text().strip(), 'base_url': self.openai_base_url_edit.text().strip(), 'model': self.translation_model_combo.currentText().strip(), 'temperature': float(self.openai_temp_edit.text().strip() or '0.0'), 'timeout': int(self.openai_timeout_edit.text().strip() or '60'), 'stream': self.openai_stream_checkbox.isChecked(), 'prompt_template': self.openai_prompt_edit.toPlainText()}
         api_config = {'appid': self.appid_edit.text().strip(), 'secretKey': self.key_edit.text().strip()}
-        self.translation_worker = TranslationWorker(mode, input_text, ollama_config, api_config)
+        if mode == 'API翻译':
+            actual_mode = 'API翻译'
+        elif provider == 'openai':
+            actual_mode = 'OpenAI翻译'
+        else:
+            actual_mode = 'Ollama翻译'
+        self.translation_worker = TranslationWorker(actual_mode, input_text, ollama_config, openai_config, api_config)
         self.translation_worker.translation_finished.connect(self.on_translation_finished)
         self.translation_worker.progress_updated.connect(self.progress_bar.setValue)
         self.translation_worker.stream_chunk_received.connect(self.on_stream_chunk_received)
@@ -1182,29 +1613,79 @@ class MainUI(QMainWindow):
 
     def on_stream_chunk_received(self, chunk):
         show_thinking = self.config.get('show_thinking', True) if hasattr(self, 'config') else True
+        self.raw_output_text.setReadOnly(False)
         if chunk.startswith('[THINKING]'):
             if show_thinking:
                 thinking_text = chunk[10:]
                 self.raw_output_text.setTextColor(Qt.gray)
                 self.raw_output_text.setFontItalic(True)
-                self.raw_output_text.insertPlainText(f'{thinking_text}')
+                self.raw_output_text.insertPlainText(thinking_text)
                 self._has_thinking_output = True
         elif chunk.startswith('[CONTENT]'):
-            if show_thinking and getattr(self, '_has_thinking_output', False):
-                self.raw_output_text.insertPlainText('\n')
-                self._has_thinking_output = False
             content_text = chunk[9:]
-            self.raw_output_text.setTextColor(Qt.green)
-            self.raw_output_text.setFontItalic(False)
-            self.raw_output_text.insertPlainText(content_text)
+            self._insert_content_with_thinking(content_text, show_thinking)
         else:
             self.raw_output_text.setTextColor(Qt.green)
             self.raw_output_text.setFontItalic(False)
             self.raw_output_text.insertPlainText(chunk)
+        self.raw_output_text.setReadOnly(True)
         cursor = self.raw_output_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.raw_output_text.setTextCursor(cursor)
         self.raw_output_text.ensureCursorVisible()
+
+    def _insert_content_with_thinking(self, content_text, show_thinking):
+        if not show_thinking:
+            cleaned = re.sub('\\<think\\>.*?\\<\\/think\\>', '', content_text, flags=re.DOTALL)
+            self.raw_output_text.setTextColor(Qt.green)
+            self.raw_output_text.setFontItalic(False)
+            self.raw_output_text.insertPlainText(cleaned)
+            return
+        idx = 0
+        while idx < len(content_text):
+            remaining = content_text[idx:]
+            if self._in_thinking_block:
+                end_tag = remaining.find('</think>')
+                if end_tag == -1:
+                    self.raw_output_text.setTextColor(Qt.gray)
+                    self.raw_output_text.setFontItalic(True)
+                    self.raw_output_text.insertPlainText(remaining)
+                    break
+                else:
+                    think_part = remaining[:end_tag]
+                    self.raw_output_text.setTextColor(Qt.gray)
+                    self.raw_output_text.setFontItalic(True)
+                    self.raw_output_text.insertPlainText(think_part)
+                    self._in_thinking_block = False
+                    idx += end_tag + len('</think>')
+            else:
+                start_tag = remaining.find('<think>')
+                if start_tag == -1:
+                    self.raw_output_text.setTextColor(Qt.green)
+                    self.raw_output_text.setFontItalic(False)
+                    self.raw_output_text.insertPlainText(remaining)
+                    break
+                else:
+                    if start_tag > 0:
+                        before_think = remaining[:start_tag]
+                        self.raw_output_text.setTextColor(Qt.green)
+                        self.raw_output_text.setFontItalic(False)
+                        self.raw_output_text.insertPlainText(before_think)
+                    after_start = remaining[start_tag + len('<think>'):]
+                    end_tag = after_start.find('</think>')
+                    if end_tag == -1:
+                        self.raw_output_text.setTextColor(Qt.gray)
+                        self.raw_output_text.setFontItalic(True)
+                        self.raw_output_text.insertPlainText(after_start)
+                        self._in_thinking_block = True
+                        break
+                    else:
+                        think_part = after_start[:end_tag]
+                        self.raw_output_text.setTextColor(Qt.gray)
+                        self.raw_output_text.setFontItalic(True)
+                        self.raw_output_text.insertPlainText(think_part)
+                        self._in_thinking_block = False
+                        idx += start_tag + len('<think>') + end_tag + len('</think>')
 
     def cancel_translation(self):
         if self.translation_worker and self.translation_worker.isRunning():
@@ -1223,16 +1704,27 @@ class MainUI(QMainWindow):
             QMessageBox.warning(self, '翻译失败', '未获得翻译结果')
             self.statusBar().showMessage('翻译失败')
             return
-        if raw_response and (not self.stream_checkbox.isChecked()):
-            self.raw_output_text.setPlainText(raw_response)
-        elif not self.stream_checkbox.isChecked():
+        if self.llm_radio.isChecked():
+            if self.openai_provider_radio.isChecked():
+                is_stream_mode = self.openai_stream_checkbox.isChecked()
+            else:
+                is_stream_mode = self.stream_checkbox.isChecked()
+        else:
+            is_stream_mode = False
+        if raw_response:
+            if not is_stream_mode:
+                if '<think>' in raw_response:
+                    self._display_raw_output_with_thinking(raw_response)
+                else:
+                    self.raw_output_text.setPlainText(raw_response)
+        elif not is_stream_mode and self.llm_radio.isChecked():
             self.raw_output_text.setPlainText('此功能仅在大模型翻译模式下可用')
         cleaned_result = re.sub('\\<think\\>.*?\\<\\/think\\>', '', result, flags=re.DOTALL)
         words = [word.lower() for word in cleaned_result.split() if word]
         self.display_results(words)
         self.statusBar().showMessage('翻译完成')
         auto_copy_index = self.auto_copy_combo.currentIndex() - 1
-        if auto_copy_index >= 0 and auto_copy_index < len(self.naming_results):
+        if 0 <= auto_copy_index < len(self.naming_results):
             try:
                 Clipboard().set(self.naming_results[auto_copy_index])
                 self.statusBar().showMessage(f"已自动复制 '{self.naming_results[auto_copy_index]}' 到剪贴板")
@@ -1256,19 +1748,13 @@ class MainUI(QMainWindow):
         prefix = self.prefix_edit.text().strip()
         suffix = self.suffix_edit.text().strip()
         converter = Convert()
-        naming_rules = [('私有成员', converter.case_01), ('特殊方法', converter.case_02), ('驼峰命名法', converter.case_03), ('帕斯卡命名法', converter.case_04), ('蛇形命名法', converter.case_05), ('匈牙利命名法', converter.case_06), ('烤肉串命名法', converter.case_07), ('常量命名法', converter.case_08)]
+        naming_rules = [('私有成员', converter.case_01), ('特殊方法', converter.case_02), ('驼峰命名法', converter.case_03), ('帕斯卡命名法', converter.case_04), ('蛇形命名法', converter.case_05), ('点分隔命名法', converter.case_06), ('大写蛇形命名法', converter.case_07), ('全大写无分隔', converter.case_08), ('路径分隔命名法', converter.case_09), ('串式命名法', converter.case_10), ('标题命名法', converter.case_11), ('驼峰蛇形命名法', converter.case_12), ('大写串式命名法', converter.case_13)]
         for i, (title, func) in enumerate(naming_rules):
-            result = converter.convert_warr(words, func)
+            result = func(words)
             if prefix:
-                if title in ['私有成员', '特殊方法']:
-                    result = prefix + result
-                else:
-                    result = prefix + '' + result
+                result = prefix + result
             if suffix:
-                if title in ['私有成员', '特殊方法']:
-                    result = result + suffix
-                else:
-                    result = result + '' + suffix
+                result = result + suffix
             self.add_result_widget(i, title, result)
             self.naming_results.append(result)
 
@@ -1289,20 +1775,39 @@ class MainUI(QMainWindow):
             self.config = self.get_default_config()
             self.server_edit.setText(self.config['ollama_server'])
             self.model_combo.clear()
-            models = self.config['ollama_models']
-            self.model_combo.addItems(models)
-            current_model = self.config['ollama_model']
-            if current_model in models:
-                self.model_combo.setCurrentText(current_model)
-            if hasattr(self, 'translation_model_combo'):
-                self.translation_model_combo.clear()
-                self.translation_model_combo.addItems(models)
-                if current_model in models:
-                    self.translation_model_combo.setCurrentText(current_model)
+            ollama_models = self.config['ollama_models']
+            self.model_combo.addItems(ollama_models)
+            current_ollama_model = self.config['ollama_model']
+            if current_ollama_model in ollama_models:
+                self.model_combo.setCurrentText(current_ollama_model)
             self.temp_edit.setText(str(self.config['ollama_temperature']))
             self.timeout_edit.setText(str(self.config['ollama_timeout']))
             self.stream_checkbox.setChecked(self.config['ollama_stream'])
             self.prompt_edit.setPlainText(self.config['ollama_prompt_template'])
+            self.openai_api_key_edit.setText(self.config['openai_api_key'])
+            self.openai_base_url_edit.setText(self.config['openai_base_url'])
+            self.openai_model_combo.clear()
+            openai_models = self.config['openai_models']
+            self.openai_model_combo.addItems(openai_models)
+            current_openai_model = self.config['openai_model']
+            if current_openai_model in openai_models:
+                self.openai_model_combo.setCurrentText(current_openai_model)
+            self.openai_temp_edit.setText(str(self.config['openai_temperature']))
+            self.openai_timeout_edit.setText(str(self.config['openai_timeout']))
+            self.openai_stream_checkbox.setChecked(self.config['openai_stream'])
+            self.openai_prompt_edit.setPlainText(self.config['openai_prompt_template'])
+            if hasattr(self, 'translation_model_combo'):
+                self.translation_model_combo.clear()
+                if self.config['llm_provider'] == 'openai':
+                    self.openai_provider_radio.setChecked(True)
+                    self.translation_model_combo.addItems(openai_models)
+                    if current_openai_model in openai_models:
+                        self.translation_model_combo.setCurrentText(current_openai_model)
+                else:
+                    self.ollama_provider_radio.setChecked(True)
+                    self.translation_model_combo.addItems(ollama_models)
+                    if current_ollama_model in ollama_models:
+                        self.translation_model_combo.setCurrentText(current_ollama_model)
             self.appid_edit.setText(self.config['baidu_appid'])
             self.key_edit.setText(self.config['baidu_secretKey'])
             self.always_on_top_checkbox.setChecked(self.config['always_on_top'])
@@ -1310,23 +1815,48 @@ class MainUI(QMainWindow):
             self.enable_shortcuts_checkbox.setChecked(self.config['enable_shortcuts'])
             self.auto_update_checkbox.setChecked(self.config['auto_update'])
             auto_copy_index = self.config.get('auto_copy_index', -1)
-            if auto_copy_index >= -1 and auto_copy_index <= 7:
+            if -1 <= auto_copy_index <= 12:
                 self.auto_copy_combo.setCurrentIndex(auto_copy_index + 1)
             self.toggle_always_on_top(self.config['always_on_top'])
             QMessageBox.information(self, '恢复默认', '已恢复默认设置')
             self.statusBar().showMessage('已恢复默认设置')
 
     def save_settings(self):
-        self.config['default_mode'] = '大模型翻译' if self.model_radio.isChecked() else 'API翻译'
+        self.config['default_mode'] = '大模型翻译' if self.llm_radio.isChecked() else 'API翻译'
+        self.config['llm_provider'] = 'openai' if self.openai_provider_radio.isChecked() else 'ollama'
+        if hasattr(self, 'translation_model_combo'):
+            current_model = self.translation_model_combo.currentText().strip()
+            if self.openai_provider_radio.isChecked():
+                self.config['openai_model'] = current_model
+            else:
+                self.config['ollama_model'] = current_model
         self.config['ollama_server'] = self.server_edit.text().strip()
         if hasattr(self, 'translation_model_combo'):
-            self.config['ollama_model'] = self.translation_model_combo.currentText().strip()
+            pass
         else:
             self.config['ollama_model'] = self.model_combo.currentText().strip()
         self.config['ollama_temperature'] = float(self.temp_edit.text().strip() or '0.0')
         self.config['ollama_timeout'] = int(self.timeout_edit.text().strip() or '60')
         self.config['ollama_stream'] = self.stream_checkbox.isChecked()
         self.config['ollama_prompt_template'] = self.prompt_edit.toPlainText()
+        ollama_models = []
+        for i in range(self.model_combo.count()):
+            ollama_models.append(self.model_combo.itemText(i))
+        self.config['ollama_models'] = ollama_models
+        self.config['openai_api_key'] = self.openai_api_key_edit.text().strip()
+        self.config['openai_base_url'] = self.openai_base_url_edit.text().strip()
+        if hasattr(self, 'translation_model_combo') and self.openai_provider_radio.isChecked():
+            pass
+        else:
+            self.config['openai_model'] = self.openai_model_combo.currentText().strip()
+        self.config['openai_temperature'] = float(self.openai_temp_edit.text().strip() or '0.0')
+        self.config['openai_timeout'] = int(self.openai_timeout_edit.text().strip() or '60')
+        self.config['openai_stream'] = self.openai_stream_checkbox.isChecked()
+        self.config['openai_prompt_template'] = self.openai_prompt_edit.toPlainText()
+        openai_models = []
+        for i in range(self.openai_model_combo.count()):
+            openai_models.append(self.openai_model_combo.itemText(i))
+        self.config['openai_models'] = openai_models
         self.config['baidu_appid'] = self.appid_edit.text().strip()
         self.config['baidu_secretKey'] = self.key_edit.text().strip()
         self.config['always_on_top'] = self.always_on_top_checkbox.isChecked()
@@ -1335,10 +1865,8 @@ class MainUI(QMainWindow):
         self.config['auto_update'] = self.auto_update_checkbox.isChecked()
         self.config['enable_version_check'] = self.enable_version_check_checkbox.isChecked()
         self.config['auto_copy_index'] = self.auto_copy_combo.currentIndex() - 1
-        models = []
-        for i in range(self.model_combo.count()):
-            models.append(self.model_combo.itemText(i))
-        self.config['ollama_models'] = models
+        if hasattr(self, 'theme_combo'):
+            self.config['theme'] = self.theme_combo.currentText()
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=4)
@@ -1347,8 +1875,9 @@ class MainUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, '保存失败', f'保存配置失败: {str(e)}')
 
-    def get_default_config(self):
-        return {'default_mode': '大模型翻译', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'minimize_to_tray': True, 'auto_update': True, 'enable_version_check': True, 'auto_copy_index': -1}
+    @staticmethod
+    def get_default_config():
+        return {'default_mode': '大模型翻译', 'llm_provider': 'ollama', 'ollama_server': '', 'ollama_model': '', 'ollama_temperature': 0.0, 'ollama_timeout': 60, 'ollama_stream': True, 'ollama_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'ollama_models': [''], 'openai_api_key': '', 'openai_base_url': 'https://api.openai.com/v1', 'openai_model': '', 'openai_temperature': 0.0, 'openai_timeout': 60, 'openai_stream': False, 'openai_prompt_template': 'You are a professional software variable name assistant integrated into the program as part of an API. Your task is to accurately translate the provided Chinese variable name: `{translate_word}` into the corresponding English variable name. The translated variable name should be in lowercase with words separated by spaces. Ensure that the output contains only lowercase letters and spaces, with no other characters or symbols. Output only the translated result, without any additional content.', 'openai_models': [''], 'baidu_appid': '', 'baidu_secretKey': '', 'always_on_top': False, 'enable_shortcuts': True, 'minimize_to_tray': True, 'auto_update': True, 'enable_version_check': True, 'auto_copy_index': -1}
 
     def load_config(self):
         default_config = self.get_default_config()
@@ -1367,22 +1896,7 @@ class MainUI(QMainWindow):
             self.hide()
             event.ignore()
         else:
-            if self.translation_worker and self.translation_worker.isRunning():
-                self.translation_worker.is_cancelled = True
-                self.translation_worker.quit()
-                self.translation_worker.wait()
-            if self.model_refresh_worker and self.model_refresh_worker.isRunning():
-                self.model_refresh_worker.quit()
-                self.model_refresh_worker.wait()
-            if self.update_check_worker and self.update_check_worker.isRunning():
-                self.update_check_worker.quit()
-                self.update_check_worker.wait()
-            if self.update_download_worker and self.update_download_worker.isRunning():
-                self.update_download_worker.is_cancelled = True
-                self.update_download_worker.quit()
-                self.update_download_worker.wait()
-            if self.tray_icon:
-                self.tray_icon.hide()
+            self._cleanup_workers()
             event.accept()
 
 def main():
@@ -1396,5 +1910,5 @@ def main():
     sys.exit(app.exec())
 if __name__ == '__main__':
     name = 'GrapeCoffee 智能变量名助手'
-    version = '2.1.5'
+    version = '2.2.0'
     main()
